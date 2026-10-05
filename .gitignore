@@ -5,3 +5,5 @@ data/
 .env.*
 !.env.example
 coverage/
+
+.credentials/

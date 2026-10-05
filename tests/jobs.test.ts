@@ -1,0 +1,184 @@
+import { it } from "node:test";
+import assert from "node:assert/strict";
+import { mkdtemp, rm, readFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { execFileSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
+import { Ledger } from "../server/ledger.ts";
+import { JobRunner } from "../server/jobs.ts";
+import { ApiFailure } from "../server/marble.ts";
+import type { Frame } from "../server/contracts.ts";
+
+const camera = {
+  intrinsics: {
+    width: 1280 as const,
+    height: 720 as const,
+    fx: 900,
+    fy: 900,
+    cx: 640,
+    cy: 360,
+  },
+  extrinsics: {
+    position: [0, 0, 0] as [number, number, number],
+    quaternion: [0, 0, 0, 1] as [number, number, number, number],
+    coordinateSystem: "rub" as const,
+  },
+};
+const frame: Frame = {
+  camera,
+  imageAsset: { assetId: "image" },
+  depth: { depthAsset: { assetId: "depth" } },
+};
+const pause = async () => {};
+const newPose = (ledger: Ledger) =>
+  ledger.reserve("user", randomUUID(), "pose", {
+    key: randomUUID(),
+    image: { base64: "AAAA", mimeType: "image/png" },
+  });
+const newGeneration = (ledger: Ledger) => {
+  const pose = newPose(ledger);
+  ledger.finish(pose.id, { frames: [frame] });
+  return ledger.reserve("user", randomUUID(), "generate", {
+    key: randomUUID(),
+    poseJobId: pose.id,
+    cameras: Array.from({ length: 48 }, () => camera),
+    prompt: "",
+    seed: 42,
+  });
+};
+
+it("encodes exactly 48 generated frames and reserves one credit", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "camera-runner-"));
+  const ledger = new Ledger(join(dir, "ledger.sqlite"));
+  ledger.account("user", "phone");
+  const job = newGeneration(ledger);
+  const image = join(dir, "frame.png");
+  execFileSync("ffmpeg", [
+    "-nostdin",
+    "-y",
+    "-loglevel",
+    "error",
+    "-f",
+    "lavfi",
+    "-i",
+    "color=c=0x558877:s=64x36:d=0.1",
+    "-frames:v",
+    "1",
+    image,
+  ]);
+  const bytes = await readFile(image);
+  let submits = 0;
+  const runner = new JobRunner(
+    ledger,
+    join(dir, "jobs"),
+    {
+      submit: async (task, body, key) => {
+        submits++;
+        assert.equal(task, "atlasGenerate");
+        assert.equal(key, "camera-studio-" + job.id);
+        assert.equal((body as any).targetCameras.length, 48);
+        assert.equal(
+          (body as any).contextFrames[0].depth.depthAsset.assetId,
+          "depth",
+        );
+        return {
+          id: "op-video",
+          done: true,
+          response: { frames: Array.from({ length: 48 }, () => frame) },
+        };
+      },
+      operation: async () => {
+        throw new Error("should not poll finished operation");
+      },
+      readAsset: async () => bytes,
+    },
+    pause,
+  );
+  try {
+    await runner.start(job.id, "user");
+    assert.equal(submits, 1);
+    assert.equal(ledger.getJob("user", job.id)?.status, "succeeded");
+    assert.equal(ledger.getAccount("user").credits, 2);
+    const probe = JSON.parse(
+      execFileSync(
+        "ffprobe",
+        [
+          "-v",
+          "error",
+          "-select_streams",
+          "v:0",
+          "-show_entries",
+          "stream=nb_frames,r_frame_rate",
+          "-of",
+          "json",
+          runner.videoPath(job.id),
+        ],
+        { encoding: "utf8" },
+      ),
+    );
+    assert.equal(probe.streams[0].nb_frames, "48");
+    assert.equal(probe.streams[0].r_frame_rate, "12/1");
+  } finally {
+    ledger.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+it("preserves a reservation across uncertain polling and resumes its existing operation", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "camera-resume-"));
+  let ledger = new Ledger(join(dir, "ledger.sqlite"));
+  ledger.account("user", "phone");
+  const job = newGeneration(ledger);
+  ledger.setOperation(job.id, "op-existing");
+  const neverSubmit = async () => {
+    throw new Error("must not resubmit stored operation");
+  };
+  const unavailable = new JobRunner(
+    ledger,
+    dir,
+    {
+      submit: neverSubmit,
+      operation: async () => {
+        throw new ApiFailure("Temporary network failure", false);
+      },
+      readAsset: async () => {
+        throw new Error("not reached");
+      },
+    },
+    async () => unavailable.stop(),
+  );
+  await unavailable.start(job.id, "user");
+  assert.equal(ledger.getAccount("user").credits, 2);
+  assert.equal(ledger.getJob("user", job.id)?.status, "running");
+  ledger.close();
+  ledger = new Ledger(join(dir, "ledger.sqlite"));
+  const resumed = new JobRunner(
+    ledger,
+    dir,
+    {
+      submit: neverSubmit,
+      operation: async (id) => {
+        assert.equal(id, "op-existing");
+        return {
+          id,
+          done: true,
+          error: { message: "terminal upstream failure" },
+        };
+      },
+      readAsset: async () => {
+        throw new Error("not reached");
+      },
+    },
+    pause,
+  );
+  try {
+    await resumed.start(job.id, "user");
+    await resumed.start(job.id, "user");
+    assert.equal(ledger.getJob("user", job.id)?.status, "failed");
+    assert.equal(ledger.getAccount("user").credits, 3);
+  } finally {
+    ledger.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
