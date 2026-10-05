@@ -57,6 +57,9 @@ export class Ledger {
         session_id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES accounts(user_id),
         credits INTEGER NOT NULL CHECK (credits > 0), created_at INTEGER NOT NULL, reversed INTEGER NOT NULL DEFAULT 0 CHECK (reversed IN (0, 1))
       );
+      CREATE TABLE IF NOT EXISTS payment_reversals (
+        session_id TEXT PRIMARY KEY, created_at INTEGER NOT NULL
+      );
     `);
   }
 
@@ -168,17 +171,18 @@ export class Ledger {
         return;
       }
       if (!this.db.prepare('SELECT 1 FROM accounts WHERE user_id = ?').get(userId)) throw new LedgerError('Account not found', 403, 'account_required');
-      this.db.prepare('INSERT INTO payments(session_id,user_id,credits,created_at) VALUES(?,?,?,?)').run(sessionId, userId, credits, Date.now());
-      this.db.prepare('UPDATE accounts SET credits = credits + ? WHERE user_id = ?').run(credits, userId);
+      const reversed = this.db.prepare('SELECT 1 FROM payment_reversals WHERE session_id = ?').get(sessionId);
+      this.db.prepare('INSERT INTO payments(session_id,user_id,credits,created_at,reversed) VALUES(?,?,?,?,?)').run(sessionId, userId, credits, Date.now(), reversed ? 1 : 0);
+      if (!reversed) this.db.prepare('UPDATE accounts SET credits = credits + ? WHERE user_id = ?').run(credits, userId);
     });
     tx.immediate();
   }
 
   reversePayment(sessionId: string): void {
     const tx = this.db.transaction(() => {
+      this.db.prepare('INSERT INTO payment_reversals(session_id,created_at) VALUES(?,?) ON CONFLICT(session_id) DO NOTHING').run(sessionId, Date.now());
       const payment = this.db.prepare('SELECT user_id,credits,reversed FROM payments WHERE session_id = ?').get(sessionId) as { user_id: string; credits: number; reversed: number } | undefined;
-      if (!payment) throw new LedgerError('Payment session not found', 404, 'payment_not_found');
-      if (payment.reversed) return;
+      if (!payment || payment.reversed) return;
       this.db.prepare('UPDATE accounts SET credits = credits - ? WHERE user_id = ?').run(payment.credits, payment.user_id);
       this.db.prepare('UPDATE payments SET reversed = 1 WHERE session_id = ?').run(sessionId);
     });

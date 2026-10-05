@@ -96,6 +96,17 @@ describe('Ledger', () => {
     ledger.close();
   });
 
+  it('keeps a refund tombstone when reversal arrives before payment credit', () => {
+    const { ledger } = setup();
+    ledger.account('u', null);
+    ledger.reversePayment('cs_early_refund');
+    ledger.creditPayment('u', 'cs_early_refund', 7);
+    ledger.creditPayment('u', 'cs_early_refund', 7);
+    assert.equal(ledger.getAccount('u').credits, 0);
+    errorCode(() => ledger.creditPayment('u', 'cs_early_refund', 8), 'payment_conflict');
+    ledger.close();
+  });
+
   it('scopes job lookup by owner and recovers queued/running jobs after reopening', () => {
     const { ledger, path } = setup();
     ledger.account('u', 'phone');
