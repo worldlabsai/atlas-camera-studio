@@ -198,7 +198,13 @@ export class JobRunner {
         join(dir, "video.partial.mp4"),
       ],
       { timeout: 120000, maxBuffer: 1024 * 1024 },
-    );
+    ).catch(() => {
+      throw new ApiFailure(
+        "The video could not be encoded. Your generation credit has been returned.",
+        true,
+        500,
+      );
+    });
     const { rename } = await import("node:fs/promises");
     await rename(join(dir, "video.partial.mp4"), this.videoPath(id));
     for (let i = 0; i < result.frames.length; i++)

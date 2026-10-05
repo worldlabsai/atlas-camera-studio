@@ -182,3 +182,40 @@ it("preserves a reservation across uncertain polling and resumes its existing op
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+it("returns the credit when completed upstream frames cannot be encoded", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "camera-bad-video-"));
+  const ledger = new Ledger(join(dir, "ledger.sqlite"));
+  try {
+    ledger.account("user", "phone");
+    const job = newGeneration(ledger);
+    const runner = new JobRunner(
+      ledger,
+      join(dir, "jobs"),
+      {
+        submit: async () => ({
+          id: "op-bad-video",
+          done: true,
+          response: { frames: Array.from({ length: 48 }, () => frame) },
+        }),
+        operation: async () => {
+          throw new Error("finished task must not be resubmitted");
+        },
+        readAsset: async () => Buffer.from("invalid-image"),
+      },
+      async () => {
+        throw new Error("encoding failure must not retry indefinitely");
+      },
+    );
+    await runner.start(job.id, "user");
+    assert.equal(ledger.getJob("user", job.id)?.status, "failed");
+    assert.match(
+      ledger.getJob("user", job.id)?.error || "",
+      /could not be encoded/,
+    );
+    assert.equal(ledger.getAccount("user").credits, 3);
+  } finally {
+    ledger.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
