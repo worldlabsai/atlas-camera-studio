@@ -35,6 +35,10 @@ export class LedgerError extends Error {
   }
 }
 
+const prunable = `expired_at IS NULL AND status IN ('succeeded','failed') AND created_at < ?
+  AND NOT EXISTS (SELECT 1 FROM jobs AS active WHERE active.status IN ('queued','running')
+    AND active.kind = 'generate' AND json_extract(active.payload_json,'$.poseJobId') = jobs.id)`;
+
 const json = (value: unknown): string => {
   const encoded = JSON.stringify(value);
   if (encoded === undefined)
@@ -87,7 +91,7 @@ export class Ledger {
         kind TEXT NOT NULL CHECK (kind IN ('pose', 'generate')),
         status TEXT NOT NULL CHECK (status IN ('queued', 'running', 'succeeded', 'failed')),
         payload_json TEXT NOT NULL, operation_id TEXT, result_json TEXT, error TEXT, created_at INTEGER NOT NULL,
-        refunded INTEGER NOT NULL DEFAULT 0 CHECK (refunded IN (0, 1)), UNIQUE(user_id, idempotency_key)
+        expired_at INTEGER, refunded INTEGER NOT NULL DEFAULT 0 CHECK (refunded IN (0, 1)), UNIQUE(user_id, idempotency_key)
       );
       CREATE INDEX IF NOT EXISTS jobs_user_created ON jobs(user_id, created_at DESC);
       CREATE INDEX IF NOT EXISTS jobs_status ON jobs(status);
@@ -99,6 +103,9 @@ export class Ledger {
         session_id TEXT PRIMARY KEY, created_at INTEGER NOT NULL
       );
     `);
+    const columns = this.db.pragma("table_info(jobs)") as { name: string }[];
+    if (!columns.some((c) => c.name === "expired_at"))
+      this.db.exec("ALTER TABLE jobs ADD COLUMN expired_at INTEGER");
   }
 
   account(userId: string, phoneHash: string | null): Account {
@@ -171,6 +178,12 @@ export class Ledger {
         .prepare("SELECT * FROM jobs WHERE user_id = ? AND idempotency_key = ?")
         .get(userId, key) as DbJob | undefined;
       if (prior) {
+        if (prior.expired_at !== null)
+          throw new LedgerError(
+            "This job has expired. Start a new request.",
+            410,
+            "job_expired",
+          );
         if (prior.kind !== kind || prior.payload_json !== payloadJson)
           throw new LedgerError(
             "Idempotency key was already used with different input",
@@ -333,7 +346,9 @@ export class Ledger {
 
   getJob(userId: string, id: string): Job | null {
     const row = this.db
-      .prepare("SELECT * FROM jobs WHERE user_id = ? AND id = ?")
+      .prepare(
+        "SELECT * FROM jobs WHERE user_id = ? AND id = ? AND expired_at IS NULL",
+      )
       .get(userId, id) as DbJob | undefined;
     return row ? toJob(row) : null;
   }
@@ -344,7 +359,7 @@ export class Ledger {
     return (
       this.db
         .prepare(
-          "SELECT * FROM jobs WHERE user_id = ? ORDER BY created_at DESC,rowid DESC LIMIT ?",
+          "SELECT * FROM jobs WHERE user_id = ? AND expired_at IS NULL ORDER BY created_at DESC,rowid DESC LIMIT ?",
         )
         .all(userId, limit) as DbJob[]
     ).map(toJob);
@@ -428,12 +443,30 @@ export class Ledger {
     tx.immediate();
   }
 
+  prunableJobs(cutoff: number): string[] {
+    return (
+      this.db
+        .prepare(`SELECT id FROM jobs WHERE ${prunable} LIMIT 100`)
+        .all(cutoff) as { id: string }[]
+    ).map((row) => row.id);
+  }
+
+  expireJob(id: string, cutoff: number): void {
+    this.db
+      .prepare(
+        `UPDATE jobs SET payload_json = 'null', result_json = NULL,
+      operation_id = NULL, error = NULL, expired_at = ? WHERE id = ? AND ${prunable}`,
+      )
+      .run(Date.now(), id, cutoff);
+  }
+
   close(): void {
     this.db.close();
   }
 }
 
 interface DbJob {
+  expired_at: number | null;
   id: string;
   user_id: string;
   kind: JobKind;

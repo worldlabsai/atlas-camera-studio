@@ -333,9 +333,10 @@ function Editor({ config }: { config: Config }) {
               )
                 setCloudStatus("Scene depth is processing…");
               if (x.status === "failed") {
-                setCloudStatus(
-                  "Scene depth failed: " + (x.error || "Job failed"),
-                );
+                if (x.kind === "pose")
+                  setCloudStatus(
+                    "Scene depth failed: " + (x.error || "Job failed"),
+                  );
                 setError(x.error || "Job failed");
               }
             })
@@ -1043,7 +1044,7 @@ function Editor({ config }: { config: Config }) {
           <div className="results-heading">
             <div>
               <h2>Your films</h2>
-              <p>Finished shots land here, ready to download.</p>
+              <p>Download your films within seven days.</p>
             </div>
             <button onClick={refresh}>
               Refresh <RotateCcw size={13} />

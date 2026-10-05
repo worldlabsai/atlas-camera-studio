@@ -41,6 +41,8 @@ docker run --init --restart unless-stopped \
 
 Put a managed HTTPS reverse proxy in front of the app. Route the Stripe endpoint to this same instance. Restrict access to the disk and environment file; back up the SQLite database using its online backup API rather than copying a live WAL database file alone. Restore the database and phone-hash secret together.
 
+Completed job inputs, generated-media references, and local videos are removed seven days after submission, with hourly cleanup in batches of 100. Active jobs and source poses used by active generations are retained until work finishes. Phone claims, credit balances, payment receipts, and expired-job identifiers remain for abuse prevention and idempotency. This cleanup applies to the app's live storage; backup retention and the upstream API's retention policy are separate.
+
 Default limits: one active job per user; six scene-depth requests and ten generations per user per UTC day; 300 generations and 900 total jobs per day across the demo. Limits count attempts, including failures, to bound repeated costly retries. A phone number makes repeated free accounts harder; it does not eliminate abuse.
 
 Do not launch without exercising the full hosted path: email sign-in, verified phone, three free generations, exhausted-credit block, test-mode purchase, webhook crediting, restart recovery, failed-task refund, and MP4 download. Have a second person run the same path before announcing it.

@@ -50,13 +50,18 @@ async function request(
       response.status >= 400 &&
       response.status < 500 &&
       ![404, 408, 409, 429].includes(response.status);
-    throw new ApiFailure(
-      terminal
-        ? "Marble could not accept this request. Please check your API access or input."
-        : "Marble is busy. This job will retry safely.",
-      terminal,
-      response.status,
-    );
+    const hosted = process.env.APP_MODE === "hosted";
+    const message =
+      response.status === 402
+        ? hosted
+          ? "The demo is temporarily out of API credits. Please try again later; no generation credit was used."
+          : "Your Marble API account needs more developer credits. Add credits in the developer portal to continue."
+        : terminal
+          ? hosted
+            ? "The generation service could not accept this request. Please try another image or contact support."
+            : "Marble could not accept this request. Please check your API access or input."
+          : "Marble is busy. This job will retry safely.";
+    throw new ApiFailure(message, terminal, response.status);
   }
   return data;
 }

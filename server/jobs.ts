@@ -16,6 +16,7 @@ const run = promisify(execFile);
 export class JobRunner {
   private busy = new Set<string>();
   private stopping = false;
+  private cleaning = false;
   constructor(
     private ledger: Ledger,
     private dir: string,
@@ -117,6 +118,10 @@ export class JobRunner {
             (error instanceof ApiFailure && error.terminal) ||
             error instanceof z.ZodError
           ) {
+            console.error("Job failed", {
+              id,
+              status: error instanceof ApiFailure ? error.status : 400,
+            });
             this.ledger.fail(
               id,
               error instanceof z.ZodError
@@ -136,6 +141,23 @@ export class JobRunner {
       }
     } finally {
       this.busy.delete(id);
+    }
+  }
+  async prune(cutoff = Date.now() - 7 * 24 * 60 * 60 * 1000) {
+    if (this.cleaning || this.stopping) return;
+    this.cleaning = true;
+    try {
+      for (const id of this.ledger.prunableJobs(cutoff)) {
+        if (this.stopping) break;
+        try {
+          await rm(join(this.dir, id), { recursive: true, force: true });
+          if (!this.stopping) this.ledger.expireJob(id, cutoff);
+        } catch {
+          console.error("Job cleanup will retry", { id });
+        }
+      }
+    } finally {
+      this.cleaning = false;
     }
   }
   videoPath(id: string) {

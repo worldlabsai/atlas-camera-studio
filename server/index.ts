@@ -422,8 +422,12 @@ const server = app.listen(port, host, () => {
       ")",
   );
   runner.resume();
+  void runner.prune();
 });
+const cleanupTimer = setInterval(() => void runner.prune(), 60 * 60 * 1000);
+cleanupTimer.unref();
 function shutdown() {
+  clearInterval(cleanupTimer);
   runner.stop();
   server.close(() => {
     ledger.close();
