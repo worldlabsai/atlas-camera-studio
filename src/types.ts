@@ -1,0 +1,3 @@
+export type Camera = { intrinsics: { width: number; height: number; fx: number; fy: number; cx: number; cy: number }; extrinsics: { position: [number, number, number]; quaternion: [number, number, number, number]; coordinateSystem: "rub" | "rdf" } };
+export type Config = { mode: "local" | "hosted"; clerkPublishableKey: string | null; freeCredits: number; packCredits: number; packPriceCents: number; frames: number; fps: number; apiConfigured: boolean; repoUrl: string | null };
+export type Job = { id: string; kind: "pose" | "generate"; status: "queued" | "running" | "succeeded" | "failed"; createdAt: number; result: any; error: string | null };
