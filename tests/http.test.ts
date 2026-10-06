@@ -148,3 +148,70 @@ it("hosted server refuses to start without required credentials", async () => {
   assert.notEqual(code, 0);
   assert.match(error, /Hosted mode requires APP_ORIGIN/);
 });
+
+it("hosted loopback preview accepts only Stripe test keys, including restricted keys", async () => {
+  for (const [stripeKey, allowed] of [
+    ["rk_test_fixture", true],
+    ["sk_test_fixture", true],
+    ["rk_live_fixture", false],
+    ["sk_live_fixture", false],
+  ] as const) {
+    const data = await mkdtemp(join(tmpdir(), "camera-hosted-config-"));
+    const child = spawn(
+      process.execPath,
+      ["--import", "tsx/esm", "server/index.ts"],
+      {
+        env: {
+          ...process.env,
+          APP_MODE: "hosted",
+          APP_ORIGIN: "http://localhost:3031",
+          PORT: "0",
+          DATA_DIR: data,
+          WLT_API_KEY: "fixture",
+          CLERK_PUBLISHABLE_KEY:
+            "pk_test_" + Buffer.from("clerk.example$").toString("base64"),
+          CLERK_SECRET_KEY: "sk_test_fixture",
+          PHONE_HASH_SECRET:
+            "test-phone-hash-secret-with-at-least-32-characters",
+          STRIPE_SECRET_KEY: stripeKey,
+          STRIPE_PRICE_ID: "price_fixture",
+          STRIPE_WEBHOOK_SECRET: "whsec_fixture",
+          DOTENV_CONFIG_PATH: "/dev/null",
+        },
+        stdio: ["ignore", "pipe", "pipe"],
+      },
+    );
+    let errors = "";
+    let output = "";
+    child.stderr.on("data", (chunk) => {
+      errors += chunk;
+    });
+    const exited = once(child, "exit");
+    try {
+      const started = await new Promise<boolean>((resolve, reject) => {
+        const timer = setTimeout(
+          () => reject(new Error("server startup timed out")),
+          10000,
+        );
+        child.stdout.on("data", (chunk) => {
+          output += chunk;
+          if (output.includes("Camera Studio listening")) {
+            clearTimeout(timer);
+            resolve(true);
+          }
+        });
+        child.once("exit", () => {
+          clearTimeout(timer);
+          resolve(false);
+        });
+      });
+      assert.equal(started, allowed, stripeKey + ": " + errors);
+      if (!allowed) assert.match(errors, /Hosted mode requires HTTPS/);
+    } finally {
+      if (child.exitCode === null && child.signalCode === null)
+        child.kill("SIGTERM");
+      await exited;
+      await rm(data, { recursive: true, force: true });
+    }
+  }
+});

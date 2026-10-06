@@ -44,7 +44,7 @@ if (hosted) {
     url.protocol === "http:" &&
     ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname) &&
     process.env.CLERK_SECRET_KEY!.startsWith("sk_test_") &&
-    process.env.STRIPE_SECRET_KEY!.startsWith("sk_test_");
+    /^(sk|rk)_test_/.test(process.env.STRIPE_SECRET_KEY!);
   if (
     (url.protocol !== "https:" && !localTest) ||
     process.env.PHONE_HASH_SECRET!.length < 32

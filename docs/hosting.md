@@ -14,6 +14,8 @@ Generate `PHONE_HASH_SECRET` once using `openssl rand -hex 32`. Store it securel
 
 Use one Stripe account, a one-time USD $5 Price, and Stripe Checkout. Existing account API credentials may be reused when their permissions permit these operations. Never reuse another endpoint's webhook signing secret.
 
+Prefer an app-specific restricted key. The running app needs Checkout Sessions read/write and Charges read access, plus any dependencies Stripe requires for those permissions. Create the product, price, and webhook endpoint separately in the dashboard. Test restricted keys (`rk_test_`) and standard test keys (`sk_test_`) both work for a loopback HTTP preview; live keys require HTTPS.
+
 1. Create a product named Marble Camera Studio, with one-time price $5 for three generations.
 2. Set `STRIPE_SECRET_KEY` and the resulting `STRIPE_PRICE_ID`.
 3. Create an endpoint at `https://YOUR_DOMAIN/api/stripe/webhook`.
