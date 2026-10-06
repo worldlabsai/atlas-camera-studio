@@ -655,7 +655,7 @@ function Editor({ config }: { config: Config }) {
           {config.mode === "hosted" && (
             <span className="credit-pill">
               <Sparkles size={14} />
-              {credits} credits
+              {credits} {credits === 1 ? "credit" : "credits"}
             </span>
           )}
           {config.mode === "hosted" && (
