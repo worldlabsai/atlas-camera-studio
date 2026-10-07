@@ -17,6 +17,7 @@ export type Config = {
   mode: "local" | "hosted";
   clerkPublishableKey: string | null;
   freeCredits: number;
+  creditPacks: Array<{ id: string; credits: number; priceCents: number }>;
   packCredits: number;
   packPriceCents: number;
   frames: number;

@@ -11,6 +11,8 @@ import {
   FRAMES,
   FPS,
   PACK_CREDITS,
+  CREDIT_PACKS,
+  checkoutPack,
   PACK_CENTS,
   poseSchema,
   generateSchema,
@@ -165,6 +167,11 @@ app.get("/api/config", (_req, res) =>
     mode,
     clerkPublishableKey: hosted ? process.env.CLERK_PUBLISHABLE_KEY : null,
     freeCredits: 3,
+    creditPacks: CREDIT_PACKS.map(({ id, credits, priceCents }) => ({
+      id,
+      credits,
+      priceCents,
+    })),
     packCredits: PACK_CREDITS,
     packPriceCents: PACK_CENTS,
     frames: FRAMES,
@@ -344,19 +351,26 @@ app.get("/api/jobs/:id/video", (req, res) => {
   }
   res.download(runner.videoPath(job.id), "marble-camera-" + job.id + ".mp4");
 });
-app.post("/api/checkout", async (_req, res) => {
+app.post("/api/checkout", async (req, res) => {
   if (!hosted || !stripe) {
     res
       .status(400)
       .json({ error: "Billing is only available on the hosted app." });
     return;
   }
+  const pack = checkoutPack(req.body);
   const session = await stripe.checkout.sessions.create({
     mode: "payment",
     allowed_payment_method_types: ["card"],
-    line_items: [{ price: process.env.STRIPE_PRICE_ID!, quantity: 1 }],
+    line_items: [
+      { price: process.env.STRIPE_PRICE_ID!, quantity: pack.quantity },
+    ],
     client_reference_id: res.locals.userId,
-    metadata: { app: "marble-camera-studio", userId: res.locals.userId },
+    metadata: {
+      app: "marble-camera-studio",
+      userId: res.locals.userId,
+      packId: pack.id,
+    },
     success_url: origin + "/?checkout=success",
     cancel_url: origin + "/?checkout=cancelled",
   });

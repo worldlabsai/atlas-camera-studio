@@ -3,6 +3,20 @@ export const FRAMES = 48;
 export const FPS = 12;
 export const PACK_CREDITS = 3;
 export const PACK_CENTS = 500;
+export const CREDIT_PACKS = [
+  { id: "starter", credits: 3, priceCents: 500, quantity: 1 },
+  { id: "bulk", credits: 12, priceCents: 2000, quantity: 4 },
+  { id: "studio", credits: 60, priceCents: 10000, quantity: 20 },
+] as const;
+export const checkoutSchema = z
+  .object({
+    packId: z.enum(["starter", "bulk", "studio"]).default("starter"),
+  })
+  .strict();
+export function checkoutPack(input: unknown) {
+  const { packId } = checkoutSchema.parse(input);
+  return CREDIT_PACKS.find((pack) => pack.id === packId)!;
+}
 const finite = z.number().finite();
 export const cameraSchema = z
   .object({

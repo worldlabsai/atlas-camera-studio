@@ -54,6 +54,7 @@ function Studio({ config, auth }: { config: Config; auth: Auth }) {
       : "",
   );
   const [buying, setBuying] = useState(false);
+  const [packId, setPackId] = useState("starter");
   const refreshAccount = useCallback(async () => {
     if (!auth.signedIn || config.mode !== "hosted") return;
     try {
@@ -105,7 +106,7 @@ function Studio({ config, auth }: { config: Config; auth: Auth }) {
     if (!ensureAccess()) return false;
     if (config.mode === "hosted" && (account?.credits ?? 0) < 1) {
       setMessage(
-        "You have used your free generations. Add 3 generations for $5 to continue.",
+        "You have used your free generations. Choose a credit pack to continue.",
       );
       return false;
     }
@@ -127,7 +128,7 @@ function Studio({ config, auth }: { config: Config; auth: Auth }) {
       const result = await authFetchJson<{ url: string }>(
         auth.getToken,
         "/api/checkout",
-        { method: "POST", body: "{}" },
+        { method: "POST", body: JSON.stringify({ packId }) },
       );
       const url = new URL(result.url);
       if (url.protocol !== "https:" || url.hostname !== "checkout.stripe.com")
@@ -193,12 +194,25 @@ function Studio({ config, auth }: { config: Config; auth: Auth }) {
                     Verify phone
                   </button>
                 )}
+                <select
+                  aria-label="Credit pack"
+                  value={packId}
+                  onChange={(event) => setPackId(event.target.value)}
+                  disabled={buying}
+                  className="rounded-lg border border-white/20 bg-[#080b12] px-2 py-1.5 text-white"
+                >
+                  {config.creditPacks.map((pack) => (
+                    <option key={pack.id} value={pack.id}>
+                      {pack.credits} generations · ${pack.priceCents / 100}
+                    </option>
+                  ))}
+                </select>
                 <button
                   className="rounded-lg border border-white/20 px-3 py-1.5 text-white hover:bg-white/10 disabled:opacity-50"
                   disabled={buying}
                   onClick={() => void checkout()}
                 >
-                  {buying ? "Opening Stripe…" : "3 generations · $5"}
+                  {buying ? "Opening Stripe…" : "Add credits"}
                 </button>
                 <UserButton />
               </>

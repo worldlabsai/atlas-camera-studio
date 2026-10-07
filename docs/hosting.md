@@ -4,7 +4,7 @@ Use a single application instance with a persistent local disk. SQLite stores cr
 
 ## Authentication
 
-Create a dedicated Clerk application. Enable email sign-in and phone numbers with verification. The backend checks Clerk's verified phone status before accepting work; an unverified phone string is never sufficient. Phone support in production may require a paid Clerk plan.
+Create a dedicated Clerk application. Collect email addresses without requiring email verification, and enable phone sign-in with required SMS verification. The backend checks Clerk's verified phone status before accepting work; an unverified phone string is never sufficient. Phone support in production may require a paid Clerk plan.
 
 Set `CLERK_PUBLISHABLE_KEY` and `CLERK_SECRET_KEY` for the same instance. Configure its production domain to match `APP_ORIGIN`. Enable Clerk's bot protection and review allowed SMS countries to bound SMS abuse.
 
@@ -12,7 +12,7 @@ Generate `PHONE_HASH_SECRET` once using `openssl rand -hex 32`. Store it securel
 
 ## Stripe
 
-Use one Stripe account, a one-time USD $5 Price, and Stripe Checkout. Existing account API credentials may be reused when their permissions permit these operations. Never reuse another endpoint's webhook signing secret.
+Use one Stripe account, a one-time USD $5 Price for three generations, and Stripe Checkout. The app offers fixed quantities of this price: 1 ($5 / 3 generations), 4 ($20 / 12), and 20 ($100 / 60). No additional Stripe products or prices are needed. Existing account API credentials may be reused when their permissions permit these operations. Never reuse another endpoint's webhook signing secret.
 
 Prefer an app-specific restricted key. The running app needs Checkout Sessions read/write and Charges read access, plus any dependencies Stripe requires for those permissions. Create the product, price, and webhook endpoint separately in the dashboard. Test restricted keys (`rk_test_`) and standard test keys (`sk_test_`) both work for a loopback HTTP preview; live keys require HTTPS.
 
@@ -47,4 +47,4 @@ Completed job inputs, generated-media references, and local videos are removed s
 
 Default limits: at most two jobs run concurrently across all users, with one FFmpeg thread per video; additional jobs wait in the persistent queue and resume after a restart. One active job per user; six scene-depth requests and ten generations per user per UTC day; 300 generations and 900 total jobs per day across the demo. Limits count attempts, including failures, to bound repeated costly retries. A phone number makes repeated free accounts harder; it does not eliminate abuse.
 
-Do not launch without exercising the full hosted path: email sign-in, verified phone, three free generations, exhausted-credit block, test-mode purchase, webhook crediting, restart recovery, failed-task refund, and MP4 download. Have a second person run the same path before announcing it.
+Do not launch without exercising the full hosted path: phone sign-in, verified phone, three free generations, exhausted-credit block, test-mode purchase, webhook crediting, restart recovery, failed-task refund, and MP4 download. Have a second person run the same path before announcing it.
