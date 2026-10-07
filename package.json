@@ -11,14 +11,16 @@
     "build": "vite build",
     "start": "tsx server/index.ts",
     "typecheck": "tsc --noEmit",
-    "test": "tsx --test tests/*.test.ts",
-    "format": "prettier --write src server tests docs README.md SECURITY.md"
+    "test": "tsx --test tests/*.test.ts && npm run test:trajectory",
+    "format": "prettier --write src server tests docs README.md SECURITY.md",
+    "test:trajectory": "vitest run src/trajectory/camera-trajectory.spec.ts"
   },
   "dependencies": {
     "@clerk/express": "^2.1.76",
     "@clerk/react": "^6.17.6",
     "@react-three/drei": "^10.7.9",
     "@react-three/fiber": "^9.8.1",
+    "@tanstack/react-query": "^5.104.1",
     "better-sqlite3": "^13.0.3",
     "dotenv": "^18.0.5",
     "express": "^5.2.1",
@@ -30,6 +32,7 @@
     "zod": "^4.6.5"
   },
   "devDependencies": {
+    "@tailwindcss/vite": "^4.3.3",
     "@types/better-sqlite3": "^9.6.0",
     "@types/express": "^5.0.6",
     "@types/node": "^26.6.4",
@@ -38,8 +41,10 @@
     "@types/three": "^0.186.0",
     "@vitejs/plugin-react": "^6.1.2",
     "prettier": "^3.9.9",
+    "tailwindcss": "^4.3.3",
     "tsx": "^4.23.15",
     "typescript": "^7.0.2",
-    "vite": "^8.3.2"
+    "vite": "^8.3.2",
+    "vitest": "^5.0.3"
   }
 }
