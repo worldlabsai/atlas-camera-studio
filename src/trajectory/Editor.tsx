@@ -25,6 +25,8 @@ import {
   Play,
   Plus,
   Rotate3D,
+  Undo2,
+  Redo2,
   Save,
   Send,
   Sparkles,
@@ -51,6 +53,7 @@ import {
   frameTrajectorySpaceAboveFloor,
   insertTrajectoryPivot,
   materializeTrajectorySmoothing,
+  smoothTrajectorySegments,
   moveTrajectoryPoint,
   normalizeClosedTrajectorySegments,
   partLookAtTargetIsClearOfPath,
@@ -94,6 +97,7 @@ import {
   type CameraTrajectoryHistoryVariant,
 } from "./api";
 import { authFetch, type GetToken } from "./client";
+import { useEditHistory } from "./use-edit-history";
 import { loadDepthPointCloud } from "./pose";
 import { fileToPoseBlob, posePointClouds, type PosedView } from "./pose";
 
@@ -1029,6 +1033,102 @@ export function CameraTrajectoryPage({
     views,
   ]);
   const ready = pose && referenceView && trajectoryMap;
+  const editSnapshot = useMemo(
+    () => ({
+      segments,
+      trajectorySmoothingVersion,
+      directionMode,
+      directionTarget,
+      closedLoop,
+      allowBelowFloor,
+      targetFovDegrees,
+    }),
+    [
+      segments,
+      trajectorySmoothingVersion,
+      directionMode,
+      directionTarget,
+      closedLoop,
+      allowBelowFloor,
+      targetFovDegrees,
+    ],
+  );
+  const edits = useEditHistory(
+    editSnapshot,
+    pose?.depthUri ?? null,
+    (state) => {
+      setSegments(state.segments);
+      setTrajectorySmoothingVersion(state.trajectorySmoothingVersion);
+      setDirectionMode(state.directionMode);
+      setDirectionTarget(state.directionTarget);
+      setClosedLoop(state.closedLoop);
+      setAllowBelowFloor(state.allowBelowFloor);
+      setTargetFovDegrees(state.targetFovDegrees);
+      setSelectedPivot(null);
+      setSelectedSegmentId(null);
+      setPreviewing(false);
+      setAddingPivot(false);
+      setPlacingDirectionTarget(false);
+      setPlacingLookAtSegmentId(null);
+      setPendingDirectionMode(null);
+      setError(null);
+      setNotice(null);
+    },
+  );
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (
+        !ready ||
+        homeOpen ||
+        historyOpen ||
+        submitting ||
+        savingDraft ||
+        event.isComposing
+      )
+        return;
+      if (
+        event.target instanceof Element &&
+        event.target.closest(
+          'input, textarea, select, [contenteditable]:not([contenteditable="false"]), [role="textbox"], [role="dialog"]',
+        )
+      )
+        return;
+      const key = event.key.toLowerCase();
+      if ((event.metaKey || event.ctrlKey) && key === "z") {
+        event.preventDefault();
+        if (event.shiftKey) edits.redo();
+        else edits.undo();
+      } else if (event.ctrlKey && key === "y") {
+        event.preventDefault();
+        edits.redo();
+      } else if (
+        !event.metaKey &&
+        !event.ctrlKey &&
+        !event.altKey &&
+        !previewing &&
+        !addingPivot &&
+        !placingDirectionTarget &&
+        selectedPivot &&
+        (key === "delete" || key === "backspace")
+      ) {
+        event.preventDefault();
+        deletePathPivot(selectedPivot);
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  });
+
+  function smoothPath() {
+    setSegments(smoothTrajectorySegments(segments, closedLoop));
+    setTrajectorySmoothingVersion(TRAJECTORY_SMOOTHING_VERSION);
+    setPreviewing(false);
+    setAddingPivot(false);
+    setError(null);
+    setNotice(
+      "Path smoothed. Camera aim and timing are preserved. Undo to compare.",
+    );
+  }
 
   function materializeSmoothedTrajectory(): TrajectorySegment[] {
     const materialized = materializeTrajectorySmoothing(
@@ -1390,7 +1490,7 @@ export function CameraTrajectoryPage({
       pivot.pointIndex,
     );
     if (!nextSegments) {
-      setError("Keep at least two camera points in the path.");
+      setError("That camera is no longer in the path.");
       return;
     }
 
@@ -1495,7 +1595,7 @@ export function CameraTrajectoryPage({
           aria-hidden={homeOpen}
           inert={homeOpen ? true : undefined}
         >
-          <header className="relative z-40 grid shrink-0 grid-cols-[minmax(0,1fr)_auto] items-end gap-2 border-b border-white/10 bg-[#0f1014] px-3 py-2 md:grid-cols-[11rem_minmax(16rem,1fr)_auto] md:gap-3 md:px-4">
+          <header className="relative z-40 grid shrink-0 grid-cols-[minmax(0,1fr)_auto] items-end gap-2 border-b border-white/10 bg-[#0f1014] px-3 py-2 md:grid-cols-[minmax(0,1fr)_auto] md:gap-3 md:px-4">
             <div className="hidden md:block">
               <h1 className="text-lg font-semibold tracking-[-0.025em]">
                 Plan the camera move
@@ -1507,20 +1607,27 @@ export function CameraTrajectoryPage({
               </p>
             </div>
 
-            <label className="block min-w-0">
-              <span className="mb-1 block text-[11px] font-medium text-white/55">
-                What should happen? <span className="text-[#a9bcff]"></span>
-              </span>
-              <input
-                value={prompt}
-                onChange={(event) => setPrompt(event.target.value)}
-                maxLength={1000}
-                placeholder="Example: Slowly orbit left as the person walks forward"
-                className="h-11 w-full rounded-md border border-white/15 bg-white/[0.06] px-3 text-sm text-white outline-none transition placeholder:text-white/30 hover:border-white/25 focus:border-[#a9bcff] focus:ring-2 focus:ring-[#8ca8ff]/20 disabled:opacity-40"
-              />
-            </label>
-
             <div className="flex gap-2">
+              <button
+                type="button"
+                aria-label="Undo"
+                title="Undo (⌘Z / Ctrl+Z)"
+                disabled={!edits.canUndo || submitting || savingDraft}
+                onClick={edits.undo}
+                className="grid h-11 w-11 place-items-center rounded-md border border-white/15 text-white/65 hover:bg-white/10 disabled:opacity-25"
+              >
+                <Undo2 className="h-4 w-4" />
+              </button>
+              <button
+                type="button"
+                aria-label="Redo"
+                title="Redo (⌘⇧Z / Ctrl+Shift+Z)"
+                disabled={!edits.canRedo || submitting || savingDraft}
+                onClick={edits.redo}
+                className="grid h-11 w-11 place-items-center rounded-md border border-white/15 text-white/65 hover:bg-white/10 disabled:opacity-25"
+              >
+                <Redo2 className="h-4 w-4" />
+              </button>
               <button
                 type="button"
                 onClick={() => setHistoryOpen(true)}
@@ -1714,6 +1821,7 @@ export function CameraTrajectoryPage({
                   onSelectPart={setSelectedSegmentId}
                   onDeletePart={deletePathPart}
                   onApplyShape={applyPathShape}
+                  onSmooth={smoothPath}
                   onTogglePivot={() => {
                     setAddingPivot((current) => !current);
                     setPreviewing(false);
@@ -1744,7 +1852,7 @@ export function CameraTrajectoryPage({
               </button>
             )}
 
-            {!previewing && views.length >= 2 && (
+            {!previewing && views.length >= 1 && (
               <CameraDirectionPanel
                 pose={pose}
                 pivots={cameraPivots}
@@ -1801,7 +1909,7 @@ export function CameraTrajectoryPage({
 
             {!previewing &&
               !placingDirectionTarget &&
-              views.length >= 2 &&
+              views.length >= 1 &&
               !directionPanelOpen && (
                 <button
                   ref={directionPanelRestoreButton}
@@ -1840,19 +1948,6 @@ export function CameraTrajectoryPage({
                   inert={placingDirectionTarget ? true : undefined}
                   className={`flex flex-wrap items-end gap-2 rounded-xl border border-white/15 bg-[#0b0c0f]/92 p-2.5 pl-4 shadow-2xl backdrop-blur-xl sm:gap-3 xl:flex-nowrap ${placingDirectionTarget ? "pointer-events-none invisible" : ""}`}
                 >
-                  <div className="hidden min-w-0 flex-1 lg:block">
-                    <p className="text-sm font-semibold text-white">
-                      {views.length >= 2
-                        ? "3D path ready · aim cameras at right"
-                        : "Draw a route in the left map"}
-                    </p>
-                    <p className="mt-0.5 truncate text-xs text-white/45">
-                      {views.length >= 2
-                        ? "4 seconds · 720p · 1 generation credit"
-                        : "First point = frame 1 · last point = final frame"}
-                    </p>
-                  </div>
-
                   <OutputNumberInput
                     label="FOV°"
                     value={targetFovDegrees}
@@ -1875,6 +1970,21 @@ export function CameraTrajectoryPage({
                     )}
                     {savingDraft ? "Saving…" : "Save draft"}
                   </button>
+
+                  <label className="block min-w-48 flex-1">
+                    <span className="mb-1 block text-[11px] font-medium text-white/55">
+                      What should happen?{" "}
+                      <span className="text-[#a9bcff]"></span>
+                    </span>
+                    <input
+                      aria-label="Video prompt"
+                      value={prompt}
+                      onChange={(event) => setPrompt(event.target.value)}
+                      maxLength={1000}
+                      placeholder="Example: Slowly orbit left as the person walks forward"
+                      className="h-11 w-full rounded-md border border-white/15 bg-white/[0.06] px-3 text-sm text-white outline-none transition placeholder:text-white/30 hover:border-white/25 focus:border-[#a9bcff] focus:ring-2 focus:ring-[#8ca8ff]/20 disabled:opacity-40"
+                    />
+                  </label>
 
                   <button
                     type="button"
@@ -2113,7 +2223,7 @@ function CameraDirectionPanel({
         <div>
           <h2 className="text-sm font-semibold text-white">Camera direction</h2>
           <p className="mt-1 text-[11px] leading-4 text-white/45">
-            Pick one behavior, or set individual camera angles.
+            Select a camera to move, aim, or delete it.
           </p>
         </div>
         <button
@@ -2130,129 +2240,6 @@ function CameraDirectionPanel({
           <PanelRightClose className="h-4 w-4" />
         </button>
       </div>
-
-      <div className="mt-3">
-        <p className="text-[10px] font-semibold uppercase tracking-[0.1em] text-white/40">
-          Camera behavior
-        </p>
-        <div
-          role="group"
-          aria-label="Camera behavior"
-          className="mt-1.5 grid grid-cols-2 gap-1.5"
-        >
-          {CAMERA_DIRECTION_PRESETS.map((preset) => {
-            const selected = directionMode === preset.mode;
-            return (
-              <button
-                key={preset.mode}
-                type="button"
-                data-camera-direction-mode={preset.mode}
-                aria-pressed={selected}
-                title={preset.title}
-                onClick={() => onDirectionModeChange(preset.mode)}
-                className={`h-8 rounded-md border px-2 text-[11px] font-semibold transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#a9bcff] active:translate-y-px ${
-                  selected
-                    ? "border-[#a9bcff] bg-[#a9bcff] text-[#10131c]"
-                    : "border-white/15 bg-white/[0.04] text-white/60 hover:border-white/30 hover:text-white"
-                }`}
-              >
-                {preset.label}
-              </button>
-            );
-          })}
-        </div>
-        {directionMode !== "manual" && !isPointDirectionMode(directionMode) && (
-          <p className="mt-1.5 text-[10px] leading-4 text-white/35">
-            Adjusted cameras override this preset; the rest stay automatic.
-          </p>
-        )}
-      </div>
-
-      {pointDirectionMode && (
-        <div className="mt-3 flex flex-col items-stretch gap-2 rounded-lg border border-[#f4b860]/25 bg-[#f4b860]/[0.06] p-2.5">
-          <div className="min-w-0">
-            <p className="text-[11px] font-semibold text-[#ffd18d]">
-              {hasDirectionTarget ? "Target set in scene" : "Choose a target"}
-            </p>
-            <p className="mt-0.5 text-[10px] leading-4 text-white/40">
-              Every camera points{" "}
-              {directionMode === "look_at" ? "at" : "away from"} this spot with
-              a level horizon.
-            </p>
-          </div>
-          <button
-            type="button"
-            data-change-direction-target="true"
-            onClick={onChooseDirectionTarget}
-            className="h-8 shrink-0 rounded-md border border-[#f4b860]/35 bg-[#f4b860]/10 px-2.5 text-[11px] font-semibold text-[#ffd18d] transition hover:bg-[#f4b860]/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#f4b860] active:translate-y-px"
-          >
-            {hasDirectionTarget ? "Change point" : "Pick point in 3D"}
-          </button>
-        </div>
-      )}
-
-      {selectedPart && (
-        <div
-          data-part-look-at={selectedPart.hasLookAtTarget ? "set" : "unset"}
-          className="mt-3 rounded-lg border border-white/15 bg-white/[0.035] p-2.5"
-        >
-          <div className="flex items-start justify-between gap-3">
-            <div className="min-w-0">
-              <p className="text-[11px] font-semibold text-white/70">
-                Selected Part {selectedPart.number}
-              </p>
-              <p className="mt-0.5 text-[10px] leading-4 text-white/40">
-                {selectedPart.hasLookAtTarget
-                  ? "This part looks at its own scene point."
-                  : pointDirectionMode
-                    ? "The whole path currently uses the scene target."
-                    : "This part uses the whole-path camera behavior."}
-              </p>
-            </div>
-            {selectedPart.hasLookAtTarget && (
-              <span className="mt-0.5 h-2 w-2 shrink-0 rounded-full bg-[#f4b860] shadow-[0_0_10px_rgba(244,184,96,0.65)]" />
-            )}
-          </div>
-          {selectedPart.hasLookAtTarget ? (
-            <div className="mt-2 grid grid-cols-2 gap-1.5">
-              <button
-                type="button"
-                data-change-part-look-at={selectedPart.number}
-                onClick={() => onChoosePartDirectionTarget(selectedPart.id)}
-                className="h-8 rounded-md border border-[#f4b860]/35 bg-[#f4b860]/10 px-2 text-[11px] font-semibold text-[#ffd18d] transition hover:bg-[#f4b860]/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#f4b860] active:translate-y-px"
-              >
-                Change point
-              </button>
-              <button
-                type="button"
-                data-remove-part-look-at={selectedPart.number}
-                onClick={() => onRemovePartDirectionTarget(selectedPart.id)}
-                className="h-8 rounded-md border border-white/15 px-2 text-[11px] font-semibold text-white/55 transition hover:border-white/30 hover:bg-white/[0.06] hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#a9bcff] active:translate-y-px"
-              >
-                Remove
-              </button>
-            </div>
-          ) : directionMode === "look_at" && hasDirectionTarget ? (
-            <button
-              type="button"
-              data-limit-look-at-to-part={selectedPart.number}
-              onClick={() => onLimitDirectionTargetToPart(selectedPart.id)}
-              className="mt-2 h-8 w-full rounded-md border border-[#f4b860]/35 bg-[#f4b860]/10 px-2 text-[11px] font-semibold text-[#ffd18d] transition hover:bg-[#f4b860]/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#f4b860] active:translate-y-px"
-            >
-              Look here only for Part {selectedPart.number}
-            </button>
-          ) : (
-            <button
-              type="button"
-              data-add-part-look-at={selectedPart.number}
-              onClick={() => onChoosePartDirectionTarget(selectedPart.id)}
-              className="mt-2 h-8 w-full rounded-md border border-[#f4b860]/35 bg-[#f4b860]/10 px-2 text-[11px] font-semibold text-[#ffd18d] transition hover:bg-[#f4b860]/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#f4b860] active:translate-y-px"
-            >
-              Look at a point for Part {selectedPart.number}
-            </button>
-          )}
-        </div>
-      )}
 
       <div className="mt-3 flex items-center gap-2">
         <div
@@ -2291,13 +2278,9 @@ function CameraDirectionPanel({
             type="button"
             data-delete-camera-point={selectedPivot.pivotNumber}
             aria-label={`Delete camera point ${selectedPivot.pivotNumber}`}
-            disabled={disabled || pivots.length <= 2}
+            disabled={disabled}
             onClick={() => onDelete(selectedPivot)}
-            title={
-              pivots.length <= 2
-                ? "A path needs at least two camera points"
-                : `Remove camera ${selectedPivot.pivotNumber}, including its position and direction`
-            }
+            title={`Delete camera ${selectedPivot.pivotNumber} (Delete / Backspace)`}
             className="flex h-8 shrink-0 items-center justify-center gap-1 rounded-md border border-red-400/25 bg-red-500/[0.06] px-2 text-[11px] font-medium text-red-200/70 transition hover:border-red-400/45 hover:bg-red-500/10 hover:text-red-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-300 disabled:cursor-not-allowed disabled:opacity-30"
           >
             <Trash2 className="h-3.5 w-3.5" />
@@ -2420,6 +2403,128 @@ function CameraDirectionPanel({
           Choose a point above to aim its camera.
         </div>
       )}
+      <div className="mt-3">
+        <p className="text-[10px] font-semibold uppercase tracking-[0.1em] text-white/40">
+          Camera behavior
+        </p>
+        <div
+          role="group"
+          aria-label="Camera behavior"
+          className="mt-1.5 grid grid-cols-2 gap-1.5"
+        >
+          {CAMERA_DIRECTION_PRESETS.map((preset) => {
+            const selected = directionMode === preset.mode;
+            return (
+              <button
+                key={preset.mode}
+                type="button"
+                data-camera-direction-mode={preset.mode}
+                aria-pressed={selected}
+                title={preset.title}
+                onClick={() => onDirectionModeChange(preset.mode)}
+                className={`h-8 rounded-md border px-2 text-[11px] font-semibold transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#a9bcff] active:translate-y-px ${
+                  selected
+                    ? "border-[#a9bcff] bg-[#a9bcff] text-[#10131c]"
+                    : "border-white/15 bg-white/[0.04] text-white/60 hover:border-white/30 hover:text-white"
+                }`}
+              >
+                {preset.label}
+              </button>
+            );
+          })}
+        </div>
+        {directionMode !== "manual" && !isPointDirectionMode(directionMode) && (
+          <p className="mt-1.5 text-[10px] leading-4 text-white/35">
+            Adjusted cameras override this preset; the rest stay automatic.
+          </p>
+        )}
+      </div>
+
+      {pointDirectionMode && (
+        <div className="mt-3 flex flex-col items-stretch gap-2 rounded-lg border border-[#f4b860]/25 bg-[#f4b860]/[0.06] p-2.5">
+          <div className="min-w-0">
+            <p className="text-[11px] font-semibold text-[#ffd18d]">
+              {hasDirectionTarget ? "Target set in scene" : "Choose a target"}
+            </p>
+            <p className="mt-0.5 text-[10px] leading-4 text-white/40">
+              Every camera points{" "}
+              {directionMode === "look_at" ? "at" : "away from"} this spot with
+              a level horizon.
+            </p>
+          </div>
+          <button
+            type="button"
+            data-change-direction-target="true"
+            onClick={onChooseDirectionTarget}
+            className="h-8 shrink-0 rounded-md border border-[#f4b860]/35 bg-[#f4b860]/10 px-2.5 text-[11px] font-semibold text-[#ffd18d] transition hover:bg-[#f4b860]/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#f4b860] active:translate-y-px"
+          >
+            {hasDirectionTarget ? "Change point" : "Pick point in 3D"}
+          </button>
+        </div>
+      )}
+
+      {selectedPart && (
+        <div
+          data-part-look-at={selectedPart.hasLookAtTarget ? "set" : "unset"}
+          className="mt-3 rounded-lg border border-white/15 bg-white/[0.035] p-2.5"
+        >
+          <div className="flex items-start justify-between gap-3">
+            <div className="min-w-0">
+              <p className="text-[11px] font-semibold text-white/70">
+                Selected Part {selectedPart.number}
+              </p>
+              <p className="mt-0.5 text-[10px] leading-4 text-white/40">
+                {selectedPart.hasLookAtTarget
+                  ? "This part looks at its own scene point."
+                  : pointDirectionMode
+                    ? "The whole path currently uses the scene target."
+                    : "This part uses the whole-path camera behavior."}
+              </p>
+            </div>
+            {selectedPart.hasLookAtTarget && (
+              <span className="mt-0.5 h-2 w-2 shrink-0 rounded-full bg-[#f4b860] shadow-[0_0_10px_rgba(244,184,96,0.65)]" />
+            )}
+          </div>
+          {selectedPart.hasLookAtTarget ? (
+            <div className="mt-2 grid grid-cols-2 gap-1.5">
+              <button
+                type="button"
+                data-change-part-look-at={selectedPart.number}
+                onClick={() => onChoosePartDirectionTarget(selectedPart.id)}
+                className="h-8 rounded-md border border-[#f4b860]/35 bg-[#f4b860]/10 px-2 text-[11px] font-semibold text-[#ffd18d] transition hover:bg-[#f4b860]/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#f4b860] active:translate-y-px"
+              >
+                Change point
+              </button>
+              <button
+                type="button"
+                data-remove-part-look-at={selectedPart.number}
+                onClick={() => onRemovePartDirectionTarget(selectedPart.id)}
+                className="h-8 rounded-md border border-white/15 px-2 text-[11px] font-semibold text-white/55 transition hover:border-white/30 hover:bg-white/[0.06] hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#a9bcff] active:translate-y-px"
+              >
+                Remove
+              </button>
+            </div>
+          ) : directionMode === "look_at" && hasDirectionTarget ? (
+            <button
+              type="button"
+              data-limit-look-at-to-part={selectedPart.number}
+              onClick={() => onLimitDirectionTargetToPart(selectedPart.id)}
+              className="mt-2 h-8 w-full rounded-md border border-[#f4b860]/35 bg-[#f4b860]/10 px-2 text-[11px] font-semibold text-[#ffd18d] transition hover:bg-[#f4b860]/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#f4b860] active:translate-y-px"
+            >
+              Look here only for Part {selectedPart.number}
+            </button>
+          ) : (
+            <button
+              type="button"
+              data-add-part-look-at={selectedPart.number}
+              onClick={() => onChoosePartDirectionTarget(selectedPart.id)}
+              className="mt-2 h-8 w-full rounded-md border border-[#f4b860]/35 bg-[#f4b860]/10 px-2 text-[11px] font-semibold text-[#ffd18d] transition hover:bg-[#f4b860]/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#f4b860] active:translate-y-px"
+            >
+              Look at a point for Part {selectedPart.number}
+            </button>
+          )}
+        </div>
+      )}
     </aside>
   );
 }
@@ -2506,6 +2611,7 @@ function TrajectoryDrawPad({
   onSelectPart,
   onDeletePart,
   onApplyShape,
+  onSmooth,
   onTogglePivot,
   onCloseLoop,
   onAllowBelowFloorChange,
@@ -2531,6 +2637,7 @@ function TrajectoryDrawPad({
   onSelectPart: (id: string) => void;
   onDeletePart: (id: string) => void;
   onApplyShape: (shape: TrajectoryShape, segmentId: string | null) => void;
+  onSmooth: () => void;
   onTogglePivot: () => void;
   onCloseLoop: () => void;
   onAllowBelowFloorChange: (allowBelowFloor: boolean) => void;
@@ -3009,6 +3116,16 @@ function TrajectoryDrawPad({
 
       <button
         type="button"
+        onClick={onSmooth}
+        disabled={disabled || addingPivot || path.length < 3}
+        title="Soften bends in the camera path while keeping camera aim and timing"
+        className="mt-2 flex h-9 w-full items-center justify-center gap-1.5 rounded border border-white/15 bg-white/[0.04] text-xs font-semibold text-white/65 transition hover:border-[#a9bcff]/45 hover:bg-[#a9bcff]/10 hover:text-white disabled:opacity-35"
+      >
+        <Sparkles className="h-3.5 w-3.5" />
+        Smooth path
+      </button>
+      <button
+        type="button"
         data-close-camera-loop="true"
         disabled={disabled || addingPivot || path.length < 3 || closedLoop}
         onClick={onCloseLoop}
@@ -3159,7 +3276,7 @@ function TrajectoryDrawPad({
       <div className="mt-2 grid grid-cols-2 gap-2">
         <button
           type="button"
-          disabled={disabled || path.length < 2}
+          disabled={disabled || path.length === 0}
           onClick={onClear}
           className="flex h-9 items-center justify-center gap-1.5 rounded border border-white/15 text-xs font-semibold text-white/60 transition hover:bg-white/10 hover:text-white disabled:opacity-25"
         >

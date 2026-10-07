@@ -65,6 +65,7 @@ export function FrustumObject({
       quaternion={camera.extrinsics.quaternion}
     >
       <lineSegments
+        raycast={() => undefined}
         geometry={geometry}
         renderOrder={overlay ? OVERLAY_RENDER_ORDER : 0}
       >

@@ -22,6 +22,8 @@ You need Node.js 22.12+ (Node 24 recommended), FFmpeg on your PATH, and an API-e
 
 The editor crops inputs to 16:9. Rotate the scene, draw a camera path on the map, adjust camera direction, and preview the move before choosing **Queue video**. Each video contains 48 frames at 12 FPS. MP4 encoding runs locally using FFmpeg.
 
+Drag a camera or its numbered point in the 3D view to move it; drag empty space to rotate the scene. Use **Smooth path** to soften bends, and find **Look at point** below Yaw and Pitch. **Delete/Backspace** removes the selected camera. **Cmd/Ctrl-Z** undoes an edit; **Cmd/Ctrl-Shift-Z** redoes it. Each drag or drawn stroke is one undo step.
+
 **Saved** contains drafts, generations, and favorites. Drafts are saved in this browser, separately for each signed-in account (up to 30 drafts), and need their source scene to remain available. Generated videos and scene data expire after seven days; download videos you want to keep.
 
 For development, run `npm run dev` and `npx vite` in separate terminals. The Vite app proxies API requests to port 3030.

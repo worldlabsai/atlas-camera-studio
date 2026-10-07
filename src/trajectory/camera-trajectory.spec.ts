@@ -34,6 +34,7 @@ import {
   unprojectTrajectoryPoint,
   type CameraView,
   type TrajectoryDrawingView,
+  type TrajectoryPoint,
   type TrajectorySegment,
   type TrajectorySpace,
 } from "./camera-trajectory";
@@ -1345,7 +1346,7 @@ describe("3D drawn camera paths", () => {
     ]);
   });
 
-  it("keeps the minimum two camera points", () => {
+  it("allows deleting the last camera points while editing", () => {
     const parts: TrajectorySegment[] = [
       {
         id: "one",
@@ -1356,7 +1357,10 @@ describe("3D drawn camera paths", () => {
       },
     ];
 
-    expect(deleteTrajectoryPivot(parts, "one", 0)).toBeNull();
+    const remaining = deleteTrajectoryPivot(parts, "one", 0)!;
+    expect(trajectoryPathFromSegments(remaining)).toEqual([[1, 1, 0]]);
+    expect(deleteTrajectoryPivot(remaining, "one", 0)).toEqual([]);
+    expect(deleteTrajectoryPivot(parts, "missing", 0)).toBeNull();
   });
 
   it("inserts a draggable pivot into the nearest path span", () => {
@@ -2065,7 +2069,38 @@ describe("3D drawn camera paths", () => {
     });
   });
 
-  it("ignores a trajectory with only one point", () => {
-    expect(cameraViewsFromTrajectory([[0, 1, 0]], START)).toEqual([]);
+  it("keeps the last camera editable until it is deleted", () => {
+    expect(cameraViewsFromTrajectory([[0, 1, 0]], START)).toMatchObject([
+      { position: [0, 1, 0] },
+    ]);
   });
+});
+
+// Closed paths must fair the seam as well as their interior bends.
+it("smooths a closed loop without a privileged seam and preserves camera metadata", () => {
+  const points: TrajectoryPoint[] = [
+    [0, 1, 0],
+    [3, 1, 0],
+    [3, 2, 3],
+    [0, 1, 3],
+  ];
+  const segment: TrajectorySegment = {
+    id: "loop",
+    points,
+    look_at_target: [1, 4, 1],
+    quaternions: points.map(() => [0, 0, 0, 1]),
+  };
+  const smooth = smoothTrajectorySegments([segment], true)[0]!;
+  const rotated = smoothTrajectorySegments(
+    [{ ...segment, points: [...points.slice(1), points[0]!] }],
+    true,
+  )[0]!;
+  expect(rotated.points).toEqual([
+    ...smooth.points.slice(1),
+    smooth.points[0]!,
+  ]);
+  expect(smooth.points[0]).not.toEqual(points[0]);
+  expect(smooth.look_at_target).toEqual(segment.look_at_target);
+  expect(smooth.quaternions).toEqual(segment.quaternions);
+  expect(smooth.points.every((point) => point[1] >= 0)).toBe(true);
 });

@@ -134,9 +134,11 @@ function trajectoryPathEntries(
 
 export function smoothTrajectorySegments(
   segments: readonly TrajectorySegment[],
+  closedLoop = false,
 ): TrajectorySegment[] {
   const smoothedPath = fairTrajectoryPoints(
     trajectoryPathEntries(segments).map((entry) => entry.point),
+    closedLoop,
   );
   let pathIndex = -1;
   let previousPoint: TrajectoryPoint | null = null;
@@ -469,6 +471,7 @@ export function materializeTrajectorySmoothing(
 
 function fairTrajectoryPoints(
   trajectoryPoints: readonly TrajectoryPoint[],
+  closedLoop = false,
 ): TrajectoryPoint[] {
   if (trajectoryPoints.length < 3) return [...trajectoryPoints];
 
@@ -476,15 +479,18 @@ function fairTrajectoryPoints(
   for (let pass = 0; pass < POSITION_FAIRING_PASSES; pass += 1) {
     const previous = points;
     points = previous.map((point, index) => {
-      if (index === 0 || index === previous.length - 1) {
+      if (!closedLoop && (index === 0 || index === previous.length - 1)) {
         return point.clone();
       }
       return point
         .clone()
         .multiplyScalar(1 - 2 * POSITION_FAIRING_NEIGHBOR_WEIGHT)
-        .addScaledVector(previous[index - 1]!, POSITION_FAIRING_NEIGHBOR_WEIGHT)
         .addScaledVector(
-          previous[index + 1]!,
+          previous[(index - 1 + previous.length) % previous.length]!,
+          POSITION_FAIRING_NEIGHBOR_WEIGHT,
+        )
+        .addScaledVector(
+          previous[(index + 1) % previous.length]!,
           POSITION_FAIRING_NEIGHBOR_WEIGHT,
         );
     });
@@ -536,8 +542,6 @@ export function deleteTrajectoryPivot(
   segmentId: string,
   pointIndex: number,
 ): TrajectorySegment[] | null {
-  if (trajectoryPathEntries(segments).length <= 2) return null;
-
   const segmentIndex = segments.findIndex(
     (segment) => segment.id === segmentId,
   );
@@ -986,8 +990,6 @@ export function cameraViewsFromTrajectory(
   reference: CameraView,
   allowBelowFloor = false,
 ): CameraView[] {
-  if (path.length < 2) return [];
-
   return path.map((point, index) => {
     const position: TrajectoryPoint = [
       point[0],

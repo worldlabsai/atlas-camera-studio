@@ -40,7 +40,6 @@ import {
   type TrajectorySegment,
 } from "./camera-trajectory";
 
-const GUIDE_COUNT = 5;
 const PATH_SAMPLES = 101;
 const SELECTED_CAMERA_RED = "#ff4d5d";
 const SELECTED_CAMERA_DARK_RED = "#3a060d";
@@ -135,7 +134,7 @@ export function CameraTrajectoryCanvas(props: CameraTrajectoryCanvasProps) {
       ref={viewer}
       role="application"
       tabIndex={0}
-      aria-label="3D camera path viewer. Drag to rotate. Use W A S D to move."
+      aria-label="3D camera path viewer. Drag a camera to move it; drag empty space to rotate. Delete removes the selected camera. Use W A S D to move."
       aria-describedby={
         props.placingDirectionTarget ? "look-at-picker-instruction" : undefined
       }
@@ -321,50 +320,26 @@ function CameraTrajectoryScene({
       views,
     ],
   );
-  const guideViews = useMemo(
+  const pivotViews = useMemo(
     () =>
-      sampleCameraPath(views, GUIDE_COUNT, {
-        directionMode,
-        directionTarget: directionTarget ?? pose.centroidWorld,
-        closedLoop,
-        allowBelowFloor,
-      }).map((view, index) => ({
+      views.map((view, index) => ({
         ...view,
-        id: `guide-${index + 1}`,
+        ...sampleCameraPivot(views, index, {
+          directionMode,
+          directionTarget: directionTarget ?? pose.centroidWorld,
+          closedLoop,
+          allowBelowFloor,
+        }),
       })),
     [
-      allowBelowFloor,
-      closedLoop,
+      views,
       directionMode,
       directionTarget,
       pose.centroidWorld,
-      views,
+      closedLoop,
+      allowBelowFloor,
     ],
   );
-  const selectedCameraView = useMemo(() => {
-    if (!selectedPivot) return null;
-    const viewIndex = selectedPivot.pivotNumber - 1;
-    const view = views[viewIndex];
-    return view
-      ? {
-          id: view.id,
-          ...sampleCameraPivot(views, viewIndex, {
-            directionMode,
-            directionTarget: directionTarget ?? pose.centroidWorld,
-            closedLoop,
-            allowBelowFloor,
-          }),
-        }
-      : null;
-  }, [
-    allowBelowFloor,
-    closedLoop,
-    directionMode,
-    directionTarget,
-    pose.centroidWorld,
-    selectedPivot,
-    views,
-  ]);
   const partDirectionTargets = useMemo(
     () =>
       segments.flatMap((segment, index) =>
@@ -533,6 +508,10 @@ function CameraTrajectoryScene({
       {!previewing && !placingDirectionTarget && (
         <TrajectoryHandles
           segments={segments}
+          views={pivotViews}
+          markerDepth={markerDepth}
+          frameWidth={frameWidth}
+          frameHeight={frameHeight}
           selectedPivot={selectedPivot}
           disabled={disabled || addingPivot}
           allowBelowFloor={allowBelowFloor}
@@ -541,17 +520,6 @@ function CameraTrajectoryScene({
           onDraggingChange={setDraggingHandle}
         />
       )}
-
-      {!previewing &&
-        !addingPivot &&
-        !placingDirectionTarget &&
-        selectedCameraView && (
-          <SelectedCameraDirection
-            view={selectedCameraView}
-            depth={markerDepth * 1.65}
-            aspectRatio={frameWidth / frameHeight}
-          />
-        )}
 
       {!previewing && (
         <>
@@ -583,41 +551,6 @@ function CameraTrajectoryScene({
           </Html>
         </>
       )}
-
-      {!previewing &&
-        !addingPivot &&
-        guideViews.map((view, index) => (
-          <group key={view.id}>
-            <FrustumObject
-              camera={{
-                intrinsics: frameIntrinsics(
-                  view.fovRadians,
-                  frameWidth,
-                  frameHeight,
-                ),
-                extrinsics: {
-                  position: view.position,
-                  quaternion: view.quaternion,
-                },
-              }}
-              color={index === 0 ? "#f7f5ef" : "#8ca8ff"}
-              depth={markerDepth}
-              overlay
-            />
-            {(index === 0 || index === guideViews.length - 1) && (
-              <Html
-                position={view.position}
-                center
-                zIndexRange={[20, 0]}
-                className="pointer-events-none"
-              >
-                <div className="whitespace-nowrap rounded border border-white/25 bg-[#17181d]/85 px-2 py-1 text-[9px] font-semibold uppercase tracking-[0.08em] text-white/70 shadow-lg backdrop-blur">
-                  {index === 0 ? "Preview start" : "Preview end"}
-                </div>
-              </Html>
-            )}
-          </group>
-        ))}
 
       {views.length >= 2 && (
         <PreviewCamera
@@ -963,6 +896,10 @@ function CameraDirectionStroke({
 
 function TrajectoryHandles({
   segments,
+  views,
+  markerDepth,
+  frameWidth,
+  frameHeight,
   selectedPivot,
   disabled,
   allowBelowFloor,
@@ -971,6 +908,10 @@ function TrajectoryHandles({
   onDraggingChange,
 }: {
   segments: readonly TrajectorySegment[];
+  views: readonly CameraView[];
+  markerDepth: number;
+  frameWidth: number;
+  frameHeight: number;
   selectedPivot: { segmentId: string; pointIndex: number } | null;
   disabled: boolean;
   allowBelowFloor: boolean;
@@ -992,6 +933,10 @@ function TrajectoryHandles({
     <TrajectoryHandle
       key={`${handle.segmentId}:${handle.pointIndex}`}
       position={handle.position}
+      view={views[handle.pivotNumber - 1]!}
+      markerDepth={markerDepth}
+      frameWidth={frameWidth}
+      frameHeight={frameHeight}
       pivotNumber={handle.pivotNumber}
       selected={
         handle.segmentId === selectedPivot?.segmentId &&
@@ -1013,6 +958,10 @@ function TrajectoryHandles({
 
 function TrajectoryHandle({
   position,
+  view,
+  markerDepth,
+  frameWidth,
+  frameHeight,
   pivotNumber,
   selected,
   hasCameraAngle,
@@ -1023,6 +972,10 @@ function TrajectoryHandle({
   onDraggingChange,
 }: {
   position: TrajectoryPoint;
+  view: CameraView;
+  markerDepth: number;
+  frameWidth: number;
+  frameHeight: number;
   pivotNumber: number;
   selected: boolean;
   hasCameraAngle: boolean;
@@ -1033,9 +986,16 @@ function TrajectoryHandle({
   onDraggingChange: (dragging: boolean) => void;
 }) {
   const group = useRef<THREE.Group>(null);
+  const orbitControls = useThree(
+    (state) => state.controls,
+  ) as OrbitControlsImpl | null;
   const canvas = useThree((state) => state.gl.domElement);
   const camera = useThree((state) => state.camera);
   const viewportHeight = useThree((state) => state.size.height);
+  const hitDepth = markerDepth * (selected ? 2.65 : 1);
+  const hitHeight =
+    2 * Math.tan(view.fovRadians / 2) * markerDepth * (selected ? 1.65 : 1);
+
   const [hovered, setHovered] = useState(false);
   const [dragging, setDragging] = useState(false);
   const drag = useRef<{
@@ -1047,7 +1007,7 @@ function TrajectoryHandle({
 
   useFrame(() => {
     if (!group.current || !(camera instanceof THREE.PerspectiveCamera)) return;
-    const distance = camera.position.distanceTo(group.current.position);
+    const distance = camera.position.distanceTo(new THREE.Vector3(...position));
     const worldHeight =
       2 * distance * Math.tan(THREE.MathUtils.degToRad(camera.fov) / 2);
     group.current.scale.setScalar((worldHeight * 10) / viewportHeight);
@@ -1064,6 +1024,8 @@ function TrajectoryHandle({
   function startDrag(event: ThreeEvent<PointerEvent>) {
     if (disabled || event.button !== 0 || drag.current) return;
     event.stopPropagation();
+    event.nativeEvent.stopImmediatePropagation();
+    if (orbitControls) orbitControls.enabled = false;
     onSelect();
 
     const worldPosition = new THREE.Vector3(...position);
@@ -1072,7 +1034,10 @@ function TrajectoryHandle({
       worldPosition,
     );
     const intersection = event.ray.intersectPlane(plane, new THREE.Vector3());
-    if (!intersection) return;
+    if (!intersection) {
+      if (orbitControls) orbitControls.enabled = true;
+      return;
+    }
 
     (event.target as Element).setPointerCapture(event.pointerId);
     drag.current = {
@@ -1109,6 +1074,7 @@ function TrajectoryHandle({
     drag.current = null;
     setDragging(false);
     onDraggingChange(false);
+    if (orbitControls) orbitControls.enabled = true;
     canvas.style.cursor = hovered ? "grab" : "";
     const target = event.target as Element;
     if (target.hasPointerCapture(event.pointerId)) {
@@ -1125,7 +1091,6 @@ function TrajectoryHandle({
 
   return (
     <group
-      ref={group}
       position={position}
       renderOrder={100}
       onPointerDown={startDrag}
@@ -1143,38 +1108,72 @@ function TrajectoryHandle({
         if (!drag.current) canvas.style.cursor = "";
       }}
     >
-      <mesh>
-        <sphereGeometry args={[1, 24, 16]} />
-        <meshBasicMaterial
-          color={dragging || hovered || selected ? "#f7f5ef" : "#a9bcff"}
-          depthTest={false}
-          depthWrite={false}
-          toneMapped={false}
+      <group quaternion={view.quaternion}>
+        <FrustumObject
+          camera={{
+            intrinsics: frameIntrinsics(
+              view.fovRadians,
+              frameWidth,
+              frameHeight,
+            ),
+            extrinsics: { position: [0, 0, 0], quaternion: [0, 0, 0, 1] },
+          }}
+          color={selected ? "#ff4d5d" : "#8ca8ff"}
+          depth={markerDepth}
+          overlay
+          markers={false}
         />
-      </mesh>
-      <mesh>
-        <sphereGeometry args={[2.5, 16, 12]} />
-        <meshBasicMaterial
-          transparent
-          opacity={0}
-          depthTest={false}
-          depthWrite={false}
+        <mesh position={[0, 0, -hitDepth / 2]}>
+          <boxGeometry
+            args={[(hitHeight * frameWidth) / frameHeight, hitHeight, hitDepth]}
+          />
+          <meshBasicMaterial transparent opacity={0} depthWrite={false} />
+        </mesh>
+      </group>
+      {selected && (
+        <SelectedCameraDirection
+          view={{ ...view, position: [0, 0, 0] }}
+          depth={markerDepth * 1.65}
+          aspectRatio={frameWidth / frameHeight}
         />
-      </mesh>
-      <Html center zIndexRange={[30, 0]} className="pointer-events-none">
-        <span
-          data-camera-angle={hasCameraAngle ? "set" : "unset"}
-          className={`grid h-5 w-5 place-items-center rounded-full border text-[10px] font-bold shadow-lg transition ${
-            dragging || hovered
-              ? "border-white bg-white text-[#10131c]"
-              : selected
+      )}
+      <group ref={group}>
+        <mesh>
+          <sphereGeometry args={[1, 24, 16]} />
+          <meshBasicMaterial
+            color={dragging || hovered || selected ? "#f7f5ef" : "#a9bcff"}
+            depthTest={false}
+            depthWrite={false}
+            toneMapped={false}
+          />
+        </mesh>
+        <mesh>
+          <sphereGeometry args={[2.5, 16, 12]} />
+          <meshBasicMaterial
+            transparent
+            opacity={0}
+            depthTest={false}
+            depthWrite={false}
+          />
+        </mesh>
+        <Html center zIndexRange={[30, 0]} className="pointer-events-none">
+          <span
+            data-camera-handle={pivotNumber}
+            data-camera-selected={selected}
+            data-camera-position={position.join(",")}
+            data-camera-angle={hasCameraAngle ? "set" : "unset"}
+            className={`grid h-5 w-5 place-items-center rounded-full border text-[10px] font-bold shadow-lg transition ${
+              dragging || hovered
                 ? "border-white bg-white text-[#10131c]"
-                : "border-[#b8c4e8] bg-[#8997bf] text-[#10131c]"
-          } ${hasCameraAngle ? "ring-2 ring-white/90 ring-offset-1 ring-offset-[#10131c]" : ""}`}
-        >
-          {pivotNumber}
-        </span>
-      </Html>
+                : selected
+                  ? "border-white bg-white text-[#10131c]"
+                  : "border-[#b8c4e8] bg-[#8997bf] text-[#10131c]"
+            } ${hasCameraAngle ? "ring-2 ring-white/90 ring-offset-1 ring-offset-[#10131c]" : ""}`}
+          >
+            {pivotNumber}
+          </span>
+        </Html>
+      </group>
     </group>
   );
 }
