@@ -17,6 +17,8 @@ export class JobRunner {
   private busy = new Set<string>();
   private stopping = false;
   private cleaning = false;
+  private active = 0;
+  private waiting: Array<(run: boolean) => void> = [];
   constructor(
     private ledger: Ledger,
     private dir: string,
@@ -30,10 +32,20 @@ export class JobRunner {
   }
   stop() {
     this.stopping = true;
+    for (const resolve of this.waiting.splice(0)) resolve(false);
   }
   async start(id: string, userId: string) {
-    if (this.busy.has(id)) return;
+    if (this.stopping || this.busy.has(id)) return;
     this.busy.add(id);
+    // Bound upstream work, image downloads, and FFmpeg across all users.
+    const acquired =
+      this.active < 2
+        ? (++this.active, true)
+        : await new Promise<boolean>((resolve) => this.waiting.push(resolve));
+    if (!acquired) {
+      this.busy.delete(id);
+      return;
+    }
     let delay = 1500;
     try {
       while (!this.stopping) {
@@ -141,6 +153,9 @@ export class JobRunner {
       }
     } finally {
       this.busy.delete(id);
+      const next = this.waiting.shift();
+      if (next) next(true);
+      else this.active--;
     }
   }
   async prune(cutoff = Date.now() - 7 * 24 * 60 * 60 * 1000) {
@@ -191,6 +206,8 @@ export class JobRunner {
         join(dir, "%03d.png"),
         "-c:v",
         "libx264",
+        "-threads",
+        "1",
         "-pix_fmt",
         "yuv420p",
         "-movflags",

@@ -48,6 +48,90 @@ const newGeneration = (ledger: Ledger) => {
   });
 };
 
+it("limits work across users, drains queued jobs, and preserves queued reservations on shutdown", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "camera-concurrency-"));
+  const ledger = new Ledger(join(dir, "ledger.sqlite"));
+  const jobs = Array.from({ length: 4 }, (_, i) => {
+    const user = "user-" + i;
+    ledger.account(user, "phone-" + i);
+    const job = ledger.reserve(user, randomUUID(), "pose", {
+      key: randomUUID(),
+      image: { base64: "AAAA", mimeType: "image/png" },
+    });
+    return { user, job };
+  });
+  const releases: Array<() => void> = [];
+  let active = 0,
+    peak = 0,
+    submits = 0;
+  const runner = new JobRunner(
+    ledger,
+    dir,
+    {
+      submit: async () => {
+        const id = "operation-" + ++submits;
+        peak = Math.max(peak, ++active);
+        await new Promise<void>((resolve) => releases.push(resolve));
+        active--;
+        return { id, done: true, response: { frames: [frame] } };
+      },
+      operation: async () => {
+        throw new Error("completed operation");
+      },
+      readAsset: async () => {
+        throw new Error("pose needs no download");
+      },
+    },
+    pause,
+  );
+  const running = jobs.map(({ user, job }) => runner.start(job.id, user));
+  try {
+    assert.equal(submits, 2);
+    await runner.start(jobs[2].job.id, jobs[2].user);
+    assert.equal(submits, 2, "duplicate queued job must not be submitted");
+    releases.shift()!();
+    await running[0];
+    await Promise.resolve();
+    assert.equal(submits, 3, "one queued job starts when a slot opens");
+    assert.equal(peak, 2);
+    runner.stop();
+    await running[3];
+    assert.equal(ledger.getJob(jobs[3].user, jobs[3].job.id)?.status, "queued");
+    for (const release of releases.splice(0)) release();
+    await Promise.all(running);
+    assert.equal(submits, 3, "shutdown must not submit queued work");
+    const resumed = new JobRunner(
+      ledger,
+      dir,
+      {
+        submit: async () => ({
+          id: "resumed",
+          done: true,
+          response: { frames: [frame] },
+        }),
+        operation: async () => {
+          throw new Error("not submitted before restart");
+        },
+        readAsset: async () => {
+          throw new Error("not needed");
+        },
+      },
+      pause,
+    );
+    await resumed.start(jobs[3].job.id, jobs[3].user);
+    assert.equal(
+      ledger.getJob(jobs[3].user, jobs[3].job.id)?.status,
+      "succeeded",
+    );
+  } finally {
+    runner.stop();
+    for (const release of releases.splice(0)) release();
+    await Promise.all(running);
+    ledger.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 it("encodes exactly 48 generated frames and reserves one credit", async () => {
   const dir = await mkdtemp(join(tmpdir(), "camera-runner-"));
   const ledger = new Ledger(join(dir, "ledger.sqlite"));
