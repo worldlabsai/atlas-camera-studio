@@ -4,6 +4,8 @@
 
 Turn a still image into a camera-controlled shot with the Marble 5 API. Upload a photo, reconstruct its depth, choose a camera path, and generate a four-second MP4.
 
+Based on the original camera-trajectory editor created by [Gowthami Somepalli (@somepago)](https://github.com/somepago) at World Labs.
+
 This repository contains the complete React editor, Express server, camera math, job runner, and optional hosted-demo billing. The local version uses your own API key. Hosted mode adds Clerk phone verification and one-time Stripe credit packs; there is no Metronome dependency.
 
 ![Draw and aim a camera path in the 3D editor](docs/editor.jpg)
@@ -88,4 +90,4 @@ Tests exercise the original trajectory drawing and camera math, coordinate trans
 
 ## License and credits
 
-MIT. The editor, drawing controls, and trajectory math are adapted from Gowthami's camera-trajectory app at World Labs. Built with Three.js, React Three Fiber, Clerk, Stripe, and FFmpeg. World Labs API usage is subject to the service's own terms and charges.
+MIT. The editor, drawing controls, and trajectory math are adapted from the original camera-trajectory app created by [Gowthami Somepalli (@somepago)](https://github.com/somepago) at World Labs. Built with Three.js, React Three Fiber, Clerk, Stripe, and FFmpeg. World Labs API usage is subject to the service's own terms and charges.
