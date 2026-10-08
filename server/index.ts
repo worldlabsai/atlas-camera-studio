@@ -177,7 +177,7 @@ app.get("/api/config", (_req, res) =>
     frames: FRAMES,
     fps: FPS,
     apiConfigured: !!process.env.WLT_API_KEY,
-    repoUrl: process.env.REPOSITORY_URL || null,
+    repoUrl: process.env.REPOSITORY_URL || "https://github.com/worldlabsai/marble-camera-studio",
   }),
 );
 app.get("/api/health", (_req, res) => res.json({ ok: true, mode }));

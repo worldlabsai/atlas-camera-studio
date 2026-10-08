@@ -30,7 +30,7 @@ No subscriptions, metering vendor, or automatic top-ups are involved. The pack p
 
 ## Deployment
 
-Set all variables documented in `.env.example`, including `APP_MODE=hosted`, an HTTPS `APP_ORIGIN`, and `DATA_DIR` on persistent storage. Set `REPOSITORY_URL` when the public source repository is available.
+Set all variables documented in `.env.example`, including `APP_MODE=hosted`, an HTTPS `APP_ORIGIN`, and `DATA_DIR` on persistent storage. The header links to the public source repository. Set `REPOSITORY_URL` to your own repository when hosting a fork.
 
 ```sh
 docker build -t marble-camera-studio .

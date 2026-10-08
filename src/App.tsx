@@ -157,7 +157,7 @@ function Studio({ config, auth }: { config: Config; auth: Auth }) {
               rel="noreferrer"
               className="hover:text-white"
             >
-              Source
+              GitHub
             </a>
           )}
           <a
