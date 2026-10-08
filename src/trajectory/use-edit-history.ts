@@ -15,7 +15,6 @@ export function useEditHistory<T>(
   const currentScope = useRef(scope);
   const gesture = useRef<number | null>(null);
   const nextGesture = useRef(0);
-  const frame = useRef(0);
   const [, refresh] = useState(0);
   useLayoutEffect(() => {
     if (currentScope.current !== scope) {
@@ -30,26 +29,17 @@ export function useEditHistory<T>(
     }
   }, [snapshot, scope]);
   useEffect(() => {
+    // Keep the transaction open until the next input. A pointer-move render
+    // can commit after pointer-up (even after its animation frame); clearing
+    // the group on pointer-up would split that drag into two undo steps.
     const start = () => {
-      cancelAnimationFrame(frame.current);
       gesture.current = ++nextGesture.current;
     };
-    // Keep pointer-up/click updates in the same transaction as the drag.
-    const end = () => {
-      frame.current = requestAnimationFrame(() => {
-        gesture.current = null;
-      });
-    };
     window.addEventListener("pointerdown", start, true);
-    window.addEventListener("pointerup", end, true);
-    window.addEventListener("pointercancel", end, true);
-    window.addEventListener("blur", end);
+    window.addEventListener("keydown", start, true);
     return () => {
-      cancelAnimationFrame(frame.current);
       window.removeEventListener("pointerdown", start, true);
-      window.removeEventListener("pointerup", end, true);
-      window.removeEventListener("pointercancel", end, true);
-      window.removeEventListener("blur", end);
+      window.removeEventListener("keydown", start, true);
     };
   }, []);
   const travel = (direction: "undo" | "redo") => {
