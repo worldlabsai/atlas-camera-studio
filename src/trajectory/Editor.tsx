@@ -688,12 +688,20 @@ export function CameraTrajectoryPage({
       new URLSearchParams(location.search).get("example") !== "igloo"
     )
       return;
-    const timer = setTimeout(() => void loadExample(draft), 0);
+    const timer = setTimeout(() => {
+      void loadExample(draft).then(() => {
+        if (canViewHistory) {
+          try {
+            sessionStorage.removeItem(EXAMPLE_HANDOFF);
+          } catch {}
+        }
+      });
+    }, 0);
     return () => clearTimeout(timer);
   }, []);
 
   useEffect(() => {
-    if (pose?.depthUri !== EXAMPLE_DEPTH || posing) return;
+    if (canViewHistory || pose?.depthUri !== EXAMPLE_DEPTH || posing) return;
     try {
       sessionStorage.setItem(
         EXAMPLE_HANDOFF,
@@ -726,6 +734,7 @@ export function CameraTrajectoryPage({
       /* Storage can be unavailable; the editor still works. */
     }
   }, [
+    canViewHistory,
     pose,
     posing,
     segments,
