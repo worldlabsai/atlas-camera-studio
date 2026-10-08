@@ -1,3 +1,4 @@
+import { EXAMPLE_DEPTH, EXAMPLE_ID } from "../example";
 import type { PinholeCamera } from "./common";
 import { type GetToken, appApiPath, authFetchJson } from "./client";
 
@@ -216,7 +217,10 @@ export async function submitCameraTrajectory(
   seed: number,
 ): Promise<CameraTrajectorySubmission> {
   const draft = await getCameraTrajectoryDraft(getToken, iterationId),
-    poseJobId = draft.depth_uri.match(/^\/api\/jobs\/([a-f0-9-]+)\/media/)?.[1];
+    poseJobId =
+      draft.depth_uri === EXAMPLE_DEPTH
+        ? EXAMPLE_ID
+        : draft.depth_uri.match(/^\/api\/jobs\/([a-f0-9-]+)\/media/)?.[1];
   if (!poseJobId)
     throw new Error("Source image is unavailable. Upload it again.");
   const job = await authFetchJson<Job>(getToken, "/api/jobs/generate", {

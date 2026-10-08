@@ -1,3 +1,4 @@
+import { EXAMPLE_DEPTH, EXAMPLE_IMAGE, EXAMPLE_METADATA } from "../example";
 import { Vector3 } from "three";
 import type { Camera, Job } from "../types";
 import { cameraPose, toCamera } from "../camera";
@@ -10,6 +11,7 @@ export type PosedView = {
   depthUri: string;
   centroidWorld: [number, number, number];
   points: {
+    focus: [number, number, number];
     positions: Float32Array;
     colors: Float32Array;
     shape: [number, number];
@@ -47,6 +49,8 @@ export async function loadDepthPointCloud(
   _intrinsics: Camera["intrinsics"],
   opts: { signal?: AbortSignal } = {},
 ) {
+  if (depthUri === EXAMPLE_DEPTH)
+    return (await loadExamplePose(opts.signal)).points;
   const match = depthUri.match(
     /^\/api\/jobs\/([a-f0-9-]+)\/media\?kind=depth$/,
   );
@@ -66,11 +70,19 @@ export async function loadDepthPointCloud(
     }),
     authFetch(getToken, depthUri, { signal: opts.signal }),
   ]);
+  return decodeLocalPointCloud(image, depth, camera, opts.signal);
+}
+async function decodeLocalPointCloud(
+  image: Response,
+  depth: Response,
+  camera: Camera,
+  signal?: AbortSignal,
+) {
   const cloud = await decodePointCloud(
     image,
     depth,
     camera,
-    opts.signal ?? new AbortController().signal,
+    signal ?? new AbortController().signal,
     240000,
   );
   const pose = cameraPose(camera),
@@ -146,4 +158,24 @@ export async function posePointClouds(
   } finally {
     clearInterval(timer);
   }
+}
+
+export async function loadExamplePose(
+  signal?: AbortSignal,
+): Promise<PosedView> {
+  const [meta, image, depth] = await Promise.all([
+    fetch(EXAMPLE_METADATA, { signal }),
+    fetch(EXAMPLE_IMAGE, { signal }),
+    fetch(EXAMPLE_DEPTH, { signal }),
+  ]);
+  if (![meta, image, depth].every((response) => response.ok))
+    throw new Error("Could not load the example. Please try again.");
+  const { camera: originalCamera, centroidWorld } = await meta.json();
+  const camera = toCamera(
+    cameraPose(originalCamera),
+    originalCamera.intrinsics,
+  );
+  const imageUrl = await blobToDataUrl(await image.clone().blob());
+  const points = await decodeLocalPointCloud(image, depth, camera, signal);
+  return { imageUrl, camera, centroidWorld, points, depthUri: EXAMPLE_DEPTH };
 }

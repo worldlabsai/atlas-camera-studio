@@ -1,3 +1,4 @@
+import { EXAMPLE_ID } from "../src/example.ts";
 import "dotenv/config";
 import express from "express";
 import { clerkMiddleware, clerkClient, getAuth } from "@clerk/express";
@@ -177,7 +178,9 @@ app.get("/api/config", (_req, res) =>
     frames: FRAMES,
     fps: FPS,
     apiConfigured: !!process.env.WLT_API_KEY,
-    repoUrl: process.env.REPOSITORY_URL || "https://github.com/worldlabsai/marble-camera-studio",
+    repoUrl:
+      process.env.REPOSITORY_URL ||
+      "https://github.com/worldlabsai/atlas-camera-studio",
   }),
 );
 app.get("/api/health", (_req, res) => res.json({ ok: true, mode }));
@@ -297,7 +300,10 @@ app.post("/api/jobs/pose", (req, res) => {
 app.post("/api/jobs/generate", (req, res) => {
   const payload = generateSchema.parse(req.body);
   const source = ledger.getJob(res.locals.userId, payload.poseJobId);
-  if (source?.kind !== "pose" || source.status !== "succeeded") {
+  if (
+    payload.poseJobId !== EXAMPLE_ID &&
+    (source?.kind !== "pose" || source.status !== "succeeded")
+  ) {
     res.status(400).json({ error: "Prepare an image before generating." });
     return;
   }

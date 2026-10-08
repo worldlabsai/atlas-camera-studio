@@ -207,6 +207,33 @@ it("hosted loopback preview accepts only Stripe test keys, including restricted 
       });
       assert.equal(started, allowed, stripeKey + ": " + errors);
       if (!allowed) assert.match(errors, /Hosted mode requires HTTPS/);
+      if (started) {
+        const port = output.match(/listening on 127\.0\.0\.1:(\d+)/)![1];
+        const base = "http://localhost:" + port;
+        const example = await fetch(base + "/example/igloo.json");
+        assert.equal(example.status, 200);
+        assert.equal((await example.json()).camera.intrinsics.width, 1280);
+        assert.equal((await fetch(base + "/example/igloo.jpg")).status, 200);
+        assert.equal((await fetch(base + "/example/igloo.exr")).status, 200);
+        for (const path of [
+          "/api/jobs/generate",
+          "/api/jobs/pose",
+          "/api/checkout",
+        ]) {
+          assert.equal(
+            (
+              await fetch(base + path, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ poseJobId: "example-igloo" }),
+              })
+            ).status,
+            401,
+            path + " still requires sign-in",
+          );
+        }
+        assert.equal((await fetch(base + "/api/jobs")).status, 401);
+      }
     } finally {
       if (child.exitCode === null && child.signalCode === null)
         child.kill("SIGTERM");

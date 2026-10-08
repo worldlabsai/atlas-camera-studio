@@ -147,9 +147,7 @@ function Studio({ config, auth }: { config: Config; auth: Auth }) {
     <div className="studio-shell">
       <header className="flex flex-wrap items-center justify-between gap-2 border-b border-white/10 bg-[#080b12] px-4 py-2 text-xs text-white/60">
         <div className="flex items-center gap-4">
-          <span className="font-medium text-white/90">
-            Marble Camera Studio
-          </span>
+          <span className="font-medium text-white/90">Atlas Camera Studio</span>
           {config.repoUrl && (
             <a
               href={config.repoUrl}
@@ -245,6 +243,7 @@ function Studio({ config, auth }: { config: Config; auth: Auth }) {
           <QueryClientProvider client={queryClient}>
             <CameraTrajectoryPage
               getToken={auth.getToken}
+              canViewHistory={auth.signedIn}
               beforePrepare={ensureAccess}
               beforeGenerate={beforeGenerate}
             />

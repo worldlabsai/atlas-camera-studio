@@ -1,3 +1,5 @@
+import { EXAMPLE_ID } from "../src/example.ts";
+import { exampleFrame } from "./example.ts";
 import { mkdir, writeFile, rm, access } from "node:fs/promises";
 import { join } from "node:path";
 import { execFile } from "node:child_process";
@@ -77,8 +79,14 @@ export class JobRunner {
             } else {
               const p = generateSchema.parse(job.payload);
               const source = this.ledger.getJob(userId, p.poseJobId);
-              const context = (source?.result as TaskResult)?.frames?.[0];
-              if (!context?.depth || source?.status !== "succeeded")
+              const context =
+                p.poseJobId === EXAMPLE_ID
+                  ? exampleFrame()
+                  : (source?.result as TaskResult)?.frames?.[0];
+              if (
+                !context?.depth ||
+                (p.poseJobId !== EXAMPLE_ID && source?.status !== "succeeded")
+              )
                 throw new ApiFailure(
                   "Prepare an image before generating.",
                   true,

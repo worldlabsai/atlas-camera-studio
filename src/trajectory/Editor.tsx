@@ -1,3 +1,4 @@
+import { EXAMPLE_DEPTH, EXAMPLE_IMAGE, EXAMPLE_HANDOFF } from "../example";
 import {
   useEffect,
   useMemo,
@@ -98,7 +99,7 @@ import {
 } from "./api";
 import { authFetch, type GetToken } from "./client";
 import { useEditHistory } from "./use-edit-history";
-import { loadDepthPointCloud } from "./pose";
+import { loadDepthPointCloud, loadExamplePose } from "./pose";
 import { fileToPoseBlob, posePointClouds, type PosedView } from "./pose";
 
 const DEFAULT_FRAME_COUNT = 48;
@@ -365,10 +366,12 @@ export function cameraTrajectoryDownloadName({
 
 export function CameraTrajectoryPage({
   getToken,
+  canViewHistory,
   beforePrepare,
   beforeGenerate,
 }: {
   getToken: GetToken;
+  canViewHistory: boolean;
   beforePrepare: () => boolean;
   beforeGenerate: () => boolean;
 }) {
@@ -446,14 +449,14 @@ export function CameraTrajectoryPage({
     : pose?.centroidWorld;
   const path = useMemo(() => trajectoryPathFromSegments(segments), [segments]);
   const history = useQuery({
-    queryKey: ["camera-trajectory-history"],
+    queryKey: ["camera-trajectory-history", getToken.storageScope],
     queryFn: () => getCameraTrajectoryHistory(getToken),
-    enabled: historyOpen,
-    refetchInterval: historyOpen ? 10_000 : false,
+    enabled: historyOpen && canViewHistory,
+    refetchInterval: historyOpen && canViewHistory ? 10_000 : false,
     refetchOnWindowFocus: false,
   });
   const drafts = useQuery({
-    queryKey: ["camera-trajectory-drafts"],
+    queryKey: ["camera-trajectory-drafts", getToken.storageScope],
     queryFn: () => getCameraTrajectoryDrafts(getToken),
     enabled: historyOpen,
     refetchOnWindowFocus: false,
@@ -480,13 +483,20 @@ export function CameraTrajectoryPage({
   async function loadImage(
     file: File,
     restoredDraft?: CameraTrajectoryDraftDetails,
+    example = false,
   ) {
     if (!file.type.startsWith("image/")) {
       setError("Choose an image file.");
       return;
     }
 
-    if (!beforePrepare()) return;
+    const isExample = example || restoredDraft?.depth_uri === EXAMPLE_DEPTH;
+    if (!isExample && !beforePrepare()) return;
+    if (!isExample) {
+      try {
+        sessionStorage.removeItem(EXAMPLE_HANDOFF);
+      } catch {}
+    }
     setHomeOpen(false);
 
     poseAbort.current?.abort();
@@ -494,7 +504,9 @@ export function CameraTrajectoryPage({
     poseAbort.current = controller;
 
     if (previewUrlRef.current) URL.revokeObjectURL(previewUrlRef.current);
-    const nextPreviewUrl = URL.createObjectURL(file);
+    const nextPreviewUrl = isExample
+      ? EXAMPLE_IMAGE
+      : URL.createObjectURL(file);
     previewUrlRef.current = nextPreviewUrl;
     setPreviewUrl(nextPreviewUrl);
     setFileName(file.name);
@@ -527,26 +539,38 @@ export function CameraTrajectoryPage({
     setPosing(true);
 
     try {
-      const blob = restoredDraft ? file : await fileToPoseBlob(file);
-      const nextPose = restoredDraft
-        ? {
-            imageUrl: restoredDraft.reference_image_base64,
-            camera: restoredDraft.reference_camera,
-            points: await loadDepthPointCloud(
-              getToken,
-              restoredDraft.depth_uri,
-              restoredDraft.reference_camera.intrinsics,
-              { signal: controller.signal },
-            ),
-            depthUri: restoredDraft.depth_uri,
-            centroidWorld: restoredDraft.centroid_world,
-          }
-        : (
-            await posePointClouds(getToken, [blob], {
-              signal: controller.signal,
-              onTick: setPoseElapsed,
-            })
-          )[0];
+      const blob = isExample
+        ? await fetch(EXAMPLE_IMAGE, { signal: controller.signal }).then(
+            (response) => {
+              if (!response.ok)
+                throw new Error("Could not load the example image.");
+              return response.blob();
+            },
+          )
+        : restoredDraft
+          ? file
+          : await fileToPoseBlob(file);
+      const nextPose = isExample
+        ? await loadExamplePose(controller.signal)
+        : restoredDraft
+          ? {
+              imageUrl: restoredDraft.reference_image_base64,
+              camera: restoredDraft.reference_camera,
+              points: await loadDepthPointCloud(
+                getToken,
+                restoredDraft.depth_uri,
+                restoredDraft.reference_camera.intrinsics,
+                { signal: controller.signal },
+              ),
+              depthUri: restoredDraft.depth_uri,
+              centroidWorld: restoredDraft.centroid_world,
+            }
+          : (
+              await posePointClouds(getToken, [blob], {
+                signal: controller.signal,
+                onTick: setPoseElapsed,
+              })
+            )[0];
       if (!nextPose) throw new Error("No point cloud was returned");
       if (controller.signal.aborted) return;
 
@@ -575,6 +599,27 @@ export function CameraTrajectoryPage({
           MAX_TARGET_FOV_DEGREES,
         ),
       );
+      if (isExample && !restoredDraft) {
+        const [x, y, z] = nextPose.camera.extrinsics.position;
+        const id = "example-path";
+        setSegments([
+          {
+            id,
+            points: [
+              [x, y, z],
+              [x + 0.35, y, z - 0.2],
+              [x + 0.75, y + 0.05, z - 0.45],
+            ],
+          },
+        ]);
+        setTrajectorySmoothingVersion(TRAJECTORY_SMOOTHING_VERSION);
+        setSelectedSegmentId(id);
+        setDirectionMode("look_at");
+        setDirectionTarget(nextPose.centroidWorld);
+        setPrompt(
+          "A smooth cinematic camera move around the cozy igloo. Preserve the scene and its lighting.",
+        );
+      }
       if (restoredDraft) {
         const restoredSmoothingVersion =
           restoredDraft.trajectory_smoothing_version ?? 0;
@@ -618,6 +663,86 @@ export function CameraTrajectoryPage({
       if (!controller.signal.aborted) setPosing(false);
     }
   }
+
+  function loadExample(draft?: CameraTrajectoryDraftDetails) {
+    return loadImage(
+      new File([], "Igloo example", { type: "image/jpeg" }),
+      draft,
+      true,
+    );
+  }
+
+  // Only this public sample crosses the sign-in remount. Private scenes remain
+  // account-scoped, and a new upload clears the sample handoff.
+  useEffect(() => {
+    let draft: CameraTrajectoryDraftDetails | undefined;
+    try {
+      const saved = JSON.parse(
+        sessionStorage.getItem(EXAMPLE_HANDOFF) || "null",
+      );
+      if (saved?.depth_uri === EXAMPLE_DEPTH && Array.isArray(saved.segments))
+        draft = saved;
+    } catch {}
+    if (
+      !draft &&
+      new URLSearchParams(location.search).get("example") !== "igloo"
+    )
+      return;
+    const timer = setTimeout(() => void loadExample(draft), 0);
+    return () => clearTimeout(timer);
+  }, []);
+
+  useEffect(() => {
+    if (pose?.depthUri !== EXAMPLE_DEPTH || posing) return;
+    try {
+      sessionStorage.setItem(
+        EXAMPLE_HANDOFF,
+        JSON.stringify({
+          draft_id: "example",
+          saved_at: Date.now() / 1000,
+          file_name: "Igloo example",
+          depth_uri: EXAMPLE_DEPTH,
+          centroid_world: pose.centroidWorld,
+          reference_camera: pose.camera,
+          reference_image_base64: pose.imageUrl,
+          segments,
+          target_cameras: [],
+          prompt,
+          frame_count: frameCount,
+          fps,
+          seed_count: seedCount,
+          cfg,
+          freeze_time: freezeTime,
+          target_fov_degrees: targetFovDegrees,
+          aspect_ratio: aspectRatio,
+          direction_mode: directionMode,
+          direction_target: directionTarget,
+          closed_loop: closedLoop,
+          allow_below_floor: allowBelowFloor,
+          trajectory_smoothing_version: trajectorySmoothingVersion,
+        }),
+      );
+    } catch {
+      /* Storage can be unavailable; the editor still works. */
+    }
+  }, [
+    pose,
+    posing,
+    segments,
+    prompt,
+    frameCount,
+    fps,
+    seedCount,
+    cfg,
+    freezeTime,
+    targetFovDegrees,
+    aspectRatio,
+    directionMode,
+    directionTarget,
+    closedLoop,
+    allowBelowFloor,
+    trajectorySmoothingVersion,
+  ]);
 
   pastedImageLoader.current = (file) => void loadImage(file);
 
@@ -1588,6 +1713,7 @@ export function CameraTrajectoryPage({
           onChoose={() => fileInput.current?.click()}
           onDrop={(file) => void loadImage(file)}
           onHistory={() => setHistoryOpen(true)}
+          onExample={() => void loadExample()}
         />
       ) : (
         <div
@@ -1595,6 +1721,14 @@ export function CameraTrajectoryPage({
           aria-hidden={homeOpen}
           inert={homeOpen ? true : undefined}
         >
+          {pose.depthUri === EXAMPLE_DEPTH && (
+            <div className="border-b border-white/10 bg-[#151b2c] px-4 py-2 text-xs text-white/70">
+              Example scene · Move the cameras, smooth the path, and press
+              Preview. No signup needed to explore.
+              {!canViewHistory &&
+                " Sign in and verify your phone only when you want to generate a video or upload your own image."}
+            </div>
+          )}
           <header className="relative z-40 grid shrink-0 grid-cols-[minmax(0,1fr)_auto] items-end gap-2 border-b border-white/10 bg-[#0f1014] px-3 py-2 md:grid-cols-[minmax(0,1fr)_auto] md:gap-3 md:px-4">
             <div className="hidden md:block">
               <h1 className="text-lg font-semibold tracking-[-0.025em]">
@@ -2038,6 +2172,7 @@ export function CameraTrajectoryPage({
             onChoose={() => fileInput.current?.click()}
             onDrop={(file) => void loadImage(file)}
             onHistory={() => setHistoryOpen(true)}
+            onExample={() => void loadExample()}
           />
         </div>
       )}
@@ -3376,6 +3511,7 @@ function UploadScreen({
   onChoose,
   onDrop,
   onHistory,
+  onExample,
 }: {
   previewUrl: string | null;
   posing: boolean;
@@ -3386,6 +3522,7 @@ function UploadScreen({
   onChoose: () => void;
   onDrop: (file: File) => void;
   onHistory: () => void;
+  onExample: () => void;
 }) {
   return (
     <main className="relative grid h-full place-items-center px-5">
@@ -3468,6 +3605,27 @@ function UploadScreen({
           </div>
         </button>
 
+        <button
+          type="button"
+          disabled={posing}
+          onClick={onExample}
+          className="mt-4 flex w-full items-center gap-4 rounded-md border border-[#a9bcff]/30 bg-[#a9bcff]/10 p-3 text-left transition hover:bg-[#a9bcff]/20 disabled:opacity-50"
+        >
+          <img
+            src={EXAMPLE_IMAGE}
+            alt="Cozy igloo example"
+            className="h-16 w-24 rounded object-cover"
+          />
+          <span>
+            <span className="block text-sm font-semibold text-white">
+              Explore an example
+            </span>
+            <span className="mt-1 block text-xs text-white/60">
+              Move cameras and preview a path · No signup needed
+            </span>
+          </span>
+          <Play className="ml-auto h-5 w-5 shrink-0 text-[#a9bcff]" />
+        </button>
         {error && <p className="mt-3 text-sm text-red-300">{error}</p>}
       </div>
     </main>

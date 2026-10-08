@@ -1,6 +1,6 @@
-# Marble Camera Studio
+# Atlas Camera Studio
 
-[Try the hosted app](https://camera.wlt-ai.art) · [Join the API beta waitlist](https://form.typeform.com/to/zHFR4r3A) · [API quickstart](https://atlas-beta.worldlabs.ai/docs/quickstart)
+[Try the hosted app](https://camera.wlt-ai.art) · [Explore an example — no signup](https://camera.wlt-ai.art/?example=igloo) · [Join the API beta waitlist](https://form.typeform.com/to/zHFR4r3A) · [API quickstart](https://atlas-beta.worldlabs.ai/docs/quickstart)
 
 Turn a still image into a camera-controlled shot with the Marble 5 API. Upload a photo, reconstruct its depth, choose a camera path, and generate a four-second MP4.
 
@@ -16,15 +16,21 @@ Two camera-controlled videos shared by Jos. Click a preview to open the full MP4
 
 [![Generated camera move around a group seated indoors](examples/original-camera-demo.gif)](examples/original-camera-demo.mp4)
 
-The video from Jos's [“what did Ilya see?” post](https://x.com/JosvdWest/status/2094859846982275213). This earlier demo is supplied at 2560 × 1440, 30 FPS, four seconds. [Download MP4](https://github.com/worldlabsai/marble-camera-studio/raw/refs/heads/main/examples/original-camera-demo.mp4).
+The video from Jos's [“what did Ilya see?” post](https://x.com/JosvdWest/status/2094859846982275213). This earlier demo is supplied at 2560 × 1440, 30 FPS, four seconds. [Download MP4](https://github.com/worldlabsai/atlas-camera-studio/raw/refs/heads/main/examples/original-camera-demo.mp4).
 
 ### Holographic fish orbit
 
 [![Camera orbit around holographic fish above a city](examples/holographic-fish-orbit.gif)](examples/holographic-fish-orbit.mp4)
 
-Prompt: **“camera orbits around holographic fish”**. Generated with Camera Studio: 1280 × 720, 48 frames at 12 FPS, seed 42. [Download MP4](https://github.com/worldlabsai/marble-camera-studio/raw/refs/heads/main/examples/holographic-fish-orbit.mp4).
+Prompt: **“camera orbits around holographic fish”**. Generated with Camera Studio: 1280 × 720, 48 frames at 12 FPS, seed 42. [Download MP4](https://github.com/worldlabsai/atlas-camera-studio/raw/refs/heads/main/examples/holographic-fish-orbit.mp4).
 
 The current app produces four-second videos at 12 FPS. These are output examples; the original source images and saved camera paths are not included.
+
+## Explore without signing up
+
+Choose **Explore an example** to open a prepared igloo scene with an editable camera path. Move or delete cameras, aim them, smooth the path, and preview the move without an account or API key. The public image, EXR depth, and camera metadata are bundled in [`public/example/`](public/example/); no API task runs while you explore.
+
+On the hosted app, sign in and verify a phone number when you want to **Queue video** or prepare your own image. Your example edits stay in the tab through sign-in. Generating the example uses the same credits and limits as any other video. A local fork sends the bundled scene with your own API key; it does not depend on our private asset IDs.
 
 ## Run locally
 

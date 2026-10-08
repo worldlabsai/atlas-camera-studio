@@ -16,7 +16,7 @@ Use one Stripe account, a one-time USD $5 Price for three generations, and Strip
 
 Prefer an app-specific restricted key. The running app needs Checkout Sessions read/write and Charges read access, plus any dependencies Stripe requires for those permissions. Create the product, price, and webhook endpoint separately in the dashboard. Test restricted keys (`rk_test_`) and standard test keys (`sk_test_`) both work for a loopback HTTP preview; live keys require HTTPS.
 
-1. Create a product named Marble Camera Studio, with one-time price $5 for three generations.
+1. Create a product named Atlas Camera Studio, with one-time price $5 for three generations.
 2. Set `STRIPE_SECRET_KEY` and the resulting `STRIPE_PRICE_ID`.
 3. Create an endpoint at `https://YOUR_DOMAIN/api/stripe/webhook`.
 4. Subscribe to `checkout.session.completed`, `checkout.session.async_payment_succeeded`, `charge.refunded`, and `charge.dispute.created`.
@@ -33,12 +33,12 @@ No subscriptions, metering vendor, or automatic top-ups are involved. The pack p
 Set all variables documented in `.env.example`, including `APP_MODE=hosted`, an HTTPS `APP_ORIGIN`, and `DATA_DIR` on persistent storage. The header links to the public source repository. Set `REPOSITORY_URL` to your own repository when hosting a fork.
 
 ```sh
-docker build -t marble-camera-studio .
+docker build -t atlas-camera-studio .
 docker run --init --restart unless-stopped \
   --env-file /secure/camera-studio.env \
   -v camera-studio-data:/data \
   -p 127.0.0.1:3030:3030 \
-  marble-camera-studio
+  atlas-camera-studio
 ```
 
 Put a managed HTTPS reverse proxy in front of the app. Route the Stripe endpoint to this same instance. Restrict access to the disk and environment file; back up the SQLite database using its online backup API rather than copying a live WAL database file alone. Restore the database and phone-hash secret together.

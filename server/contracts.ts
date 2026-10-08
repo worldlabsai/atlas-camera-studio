@@ -1,3 +1,4 @@
+import { EXAMPLE_ID } from "../src/example.ts";
 import { z } from "zod";
 export const FRAMES = 48;
 export const FPS = 12;
@@ -66,7 +67,7 @@ export const poseSchema = z
 export const generateSchema = z
   .object({
     key: z.uuid(),
-    poseJobId: z.uuid(),
+    poseJobId: z.union([z.uuid(), z.literal(EXAMPLE_ID)]),
     cameras: z.array(cameraSchema).length(FRAMES),
     prompt: z.string().max(2000).default(""),
     seed: z
@@ -78,7 +79,7 @@ export const generateSchema = z
   })
   .strict();
 export type Camera = z.infer<typeof cameraSchema>;
-export type Asset = { assetId?: string; url?: string };
+export type Asset = { assetId?: string; url?: string; base64?: string };
 export type Frame = {
   camera: Camera;
   imageAsset: Asset;

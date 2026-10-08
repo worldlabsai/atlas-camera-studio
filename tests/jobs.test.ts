@@ -303,3 +303,65 @@ it("returns the credit when completed upstream frames cannot be encoded", async 
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+it("the public example uses bundled inline assets, normal credits, and no pose task", async () => {
+  const { EXAMPLE_ID } = await import("../src/example.ts");
+  const { exampleFrame } = await import("../server/example.ts");
+  const example = exampleFrame();
+  const dir = await mkdtemp(join(tmpdir(), "camera-example-"));
+  const ledger = new Ledger(join(dir, "ledger.sqlite"));
+  ledger.account("user", "phone");
+  const job = ledger.reserve("user", randomUUID(), "generate", {
+    key: randomUUID(),
+    poseJobId: EXAMPLE_ID,
+    cameras: Array.from({ length: 48 }, () => example.camera),
+    prompt: "Igloo",
+    seed: 42,
+  });
+  let calls = 0;
+  const runner = new JobRunner(
+    ledger,
+    dir,
+    {
+      submit: async (task, body) => {
+        calls++;
+        assert.equal(task, "atlasGenerate");
+        const context = (body as any).contextFrames[0];
+        assert.deepEqual(context.camera, example.camera);
+        assert.match(context.imageAsset.base64, /^data:image\/jpeg;base64,/);
+        assert.match(
+          context.depth.depthAsset.base64,
+          /^data:image\/x-exr;base64,/,
+        );
+        assert.equal(context.imageAsset.assetId, undefined);
+        assert.equal(context.depth.depthAsset.url, undefined);
+        return { id: "sample-operation" };
+      },
+      operation: async () => ({
+        id: "sample-operation",
+        done: true,
+        error: { message: "test failure" },
+      }),
+      readAsset: async () => {
+        throw new Error("No download on failure");
+      },
+    },
+    async () => {
+      assert.equal(ledger.getAccount("user").credits, 2);
+    },
+  );
+  try {
+    await runner.start(job.id, "user");
+    assert.equal(calls, 1);
+    assert.equal(ledger.getJob("user", job.id)?.status, "failed");
+    assert.equal(
+      ledger.getAccount("user").credits,
+      3,
+      "failed example generation is refunded",
+    );
+  } finally {
+    runner.stop();
+    ledger.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
