@@ -1,6 +1,7 @@
 import { EXAMPLE_DEPTH, EXAMPLE_ID } from "../example";
 import type { PinholeCamera } from "./common";
 import { type GetToken, appApiPath, authFetchJson } from "./client";
+import type { CameraAimMode, CameraKeyframe } from "./keyframes";
 
 export type CameraTrajectoryReferenceImage = {
   image_base64: string;
@@ -53,7 +54,11 @@ export type CameraTrajectoryDraftDetails = {
   closed_loop?: boolean;
   allow_below_floor?: boolean;
   trajectory_smoothing_version?: number;
-  segments: CameraTrajectoryDraftSegment[];
+  /** Earlier drafts stored pivot paths; they convert to keys on open. */
+  segments?: CameraTrajectoryDraftSegment[];
+  keyframes?: CameraKeyframe[];
+  aim_mode?: CameraAimMode;
+  aim_target?: [number, number, number] | null;
   target_cameras: PinholeCamera[];
   reference_camera: PinholeCamera;
   reference_image_base64: string;
@@ -68,7 +73,9 @@ export type SaveCameraTrajectoryDraft = {
   depth_uri: string;
   centroid_world: [number, number, number];
   reference_image: CameraTrajectoryReferenceImage;
-  segments: CameraTrajectoryDraftSegment[];
+  keyframes: CameraKeyframe[];
+  aim_mode: CameraAimMode;
+  aim_target: [number, number, number] | null;
   target_cameras: PinholeCamera[];
   prompt: string;
   frame_count: number;
@@ -78,11 +85,7 @@ export type SaveCameraTrajectoryDraft = {
   freeze_time: boolean;
   target_fov_degrees: number;
   aspect_ratio: CameraTrajectoryAspectRatio;
-  direction_mode: CameraTrajectoryDirectionMode;
-  direction_target: [number, number, number] | null;
-  closed_loop: boolean;
   allow_below_floor: boolean;
-  trajectory_smoothing_version: number;
 };
 
 export type CameraTrajectorySubmission = {
@@ -143,7 +146,9 @@ type Preference = {
 const summary = (draft: Draft): CameraTrajectoryDraftSummary => ({
   ...draft,
   seed_count: 1,
-  point_count: draft.segments.reduce((n, s) => n + s.points.length, 0),
+  point_count:
+    draft.keyframes?.length ??
+    (draft.segments ?? []).reduce((n, s) => n + s.points.length, 0),
 });
 export async function saveCameraTrajectoryDraft(
   getToken: GetToken,

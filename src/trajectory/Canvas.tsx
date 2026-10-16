@@ -1,9 +1,11 @@
 import {
+  useCallback,
   useEffect,
   useMemo,
   useRef,
   useState,
   type KeyboardEvent as ReactKeyboardEvent,
+  type PointerEvent as ReactPointerEvent,
   type RefObject,
 } from "react";
 import {
@@ -11,7 +13,6 @@ import {
   Html,
   Line,
   OrbitControls,
-  PerspectiveCamera,
 } from "@react-three/drei";
 import {
   Canvas,
@@ -19,342 +20,512 @@ import {
   useThree,
   type ThreeEvent,
 } from "@react-three/fiber";
-import { RotateCcw } from "lucide-react";
+import {
+  ArrowDown,
+  ArrowLeft,
+  ArrowRight,
+  ArrowUp,
+  ChevronsDown,
+  ChevronsUp,
+  Diamond,
+  Focus,
+  Video,
+  X,
+} from "lucide-react";
 import { createIntrinsicsFromFov } from "./common";
 import * as THREE from "three";
 import type { OrbitControls as OrbitControlsImpl } from "three-stdlib";
 import { FrustumObject } from "./FrustumObject";
+import { PosedPointCloud } from "./PreviewCloud";
 import type { PosedView } from "./pose";
 import {
-  cameraDrawingView,
-  cameraPathProgressAtFrame,
+  cameraAimDegrees,
   cameraPathTarget,
-  sampleCameraPivot,
-  sampleCameraPath,
+  cameraQuaternionFromAim,
   TRAJECTORY_FLOOR_Y,
-  trajectoryPivotsFromSegments,
-  type CameraDirectionMode,
   type CameraView,
-  type TrajectoryDrawingView,
   type TrajectoryPoint,
-  type TrajectorySegment,
+  type TrajectoryQuaternion,
 } from "./camera-trajectory";
+import { layoutCameraLabels } from "./camera-labels";
+import type { CameraAimMode, CameraKeyframe, ShotCurve } from "./keyframes";
+import { usePlayheadWholeFrame, type Playhead } from "./playhead";
+import {
+  isometricViewDirection,
+  shouldHandleViewerKey,
+  viewerKeyStep,
+  viewerMovementFromKeys,
+  VIEWER_NAVIGATION_KEYS,
+  VIEWER_RESET_KEY,
+} from "./view-navigation";
+import {
+  ACCENT,
+  PATH_END,
+  PATH_START,
+  SCENE_PALETTE,
+  type StudioTheme,
+} from "../theme";
 
-const PATH_SAMPLES = 101;
-const SELECTED_CAMERA_RED = "#ff4d5d";
-const SELECTED_CAMERA_DARK_RED = "#3a060d";
-const VIEWER_KEYS = new Set(["w", "a", "s", "d"]);
+const OVERVIEW_FOV = 35;
+const CAMERA_MARKER_PIXELS = 38;
+const PATH_SAMPLES = 160;
+/** Degrees of pan or tilt per pixel of pointer movement while piloting. */
+const PILOT_LOOK_SENSITIVITY = 0.14;
+/** Degrees per second for the arrow keys while piloting. */
+const PILOT_TURN_SPEED = 55;
+const PILOT_KEYS = new Set([
+  "w",
+  "a",
+  "s",
+  "d",
+  "q",
+  "e",
+  "arrowup",
+  "arrowdown",
+  "arrowleft",
+  "arrowright",
+]);
 
-type CameraTrajectoryCanvasProps = {
-  pose: PosedView;
-  referenceView: CameraView;
-  views: readonly CameraView[];
-  segments: readonly TrajectorySegment[];
-  selectedPivot: {
-    segmentId: string;
-    pointIndex: number;
-    pivotNumber: number;
-  } | null;
-  addingPivot: boolean;
-  previewing: boolean;
-  disabled: boolean;
-  frameCount: number;
-  previewSeconds: number;
-  frameWidth: number;
-  frameHeight: number;
-  directionMode: CameraDirectionMode;
-  directionTarget: TrajectoryPoint | null;
-  directionTargetCandidates: readonly TrajectoryPoint[];
-  placingDirectionTarget: boolean;
-  placingDirectionTargetMode: "look_at" | "look_away";
-  closedLoop: boolean;
-  allowBelowFloor: boolean;
-  onPreviewDone: () => void;
-  onDrawingViewChange: (view: TrajectoryDrawingView) => void;
-  onPointChange: (
-    segmentId: string,
-    pointIndex: number,
-    position: TrajectoryPoint,
-  ) => void;
-  onPointSelect: (
-    segmentId: string,
-    pointIndex: number,
-    pivotNumber: number,
-  ) => void;
-  onPivotAdd: (position: TrajectoryPoint, pathProgress: number) => void;
-  onDirectionTargetChange: (position: TrajectoryPoint) => void;
-  onDirectionTargetCancel: () => void;
-  onDirectionTargetMiss: () => void;
+export type PilotPose = {
+  position: TrajectoryPoint;
+  yaw: number;
+  pitch: number;
 };
 
-export function CameraTrajectoryCanvas(props: CameraTrajectoryCanvasProps) {
-  const { pose, referenceView, segments } = props;
+type PilotInput = {
+  keys: Set<string>;
+  lookX: number;
+  lookY: number;
+  pointerDown: boolean;
+  slow: boolean;
+};
+
+type ViewportProps = {
+  pose: PosedView;
+  referenceView: CameraView;
+  curve: ShotCurve;
+  playhead: Playhead;
+  selectedKeyId: string | null;
+  fovRadians: number;
+  frameWidth: number;
+  frameHeight: number;
+  aimMode: CameraAimMode;
+  aimTarget: TrajectoryPoint | null;
+  allowBelowFloor: boolean;
+  theme: StudioTheme;
+  fill: boolean;
+  /** Scene size, so movement speeds suit small and large scenes alike. */
+  sceneRadius: number;
+  piloting: boolean;
+  /** An unkeyed pilot pose waiting for Set key. */
+  pendingPose: PilotPose | null;
+  targetCandidates: readonly TrajectoryPoint[];
+  placingTarget: boolean;
+  onKeySelect: (id: string) => void;
+  onKeyMove: (id: string, position: TrajectoryPoint) => void;
+  onLiveCameraMove: (position: TrajectoryPoint) => void;
+  /** Reported once each pilot gesture ends. */
+  onPilotPose: (pose: PilotPose) => void;
+  onPilotStart: () => void;
+  onPilotExit: () => void;
+  onSetKey: () => void;
+  onTargetPick: (position: TrajectoryPoint) => void;
+  onTargetCancel: () => void;
+  onTargetMiss: () => void;
+};
+
+export function CameraTrajectoryCanvas(props: ViewportProps) {
+  const { pose, referenceView, curve, piloting } = props;
   const viewer = useRef<HTMLDivElement>(null);
+  const gizmo = useRef<SVGSVGElement>(null);
   const navigationKeys = useRef(new Set<string>());
+  const pilotInput = useRef<PilotInput>({
+    keys: new Set(),
+    lookX: 0,
+    lookY: 0,
+    pointerDown: false,
+    slow: false,
+  });
+  const look = useRef<{ pointerId: number; x: number; y: number } | null>(
+    null,
+  );
   const target = useMemo(
     () => cameraPathTarget(referenceView, pose.centroidWorld),
     [pose.centroidWorld, referenceView],
   );
+  const keyPositions = curve.keyframes.map((key) => key.position);
+  const keyPositionsRef = useRef(keyPositions);
+  keyPositionsRef.current = keyPositions;
   const [overviewHome, setOverviewHome] = useState(() => ({
-    position: buildOverviewPosition(referenceView.position, target, segments),
+    position: buildOverviewPosition(
+      referenceView.position,
+      target,
+      keyPositions,
+    ),
   }));
+  const [resetVersion, setResetVersion] = useState(0);
+  const resetView = useCallback(() => {
+    navigationKeys.current.clear();
+    setOverviewHome({
+      position: buildOverviewPosition(
+        referenceView.position,
+        target,
+        keyPositionsRef.current,
+      ),
+    });
+    setResetVersion((version) => version + 1);
+  }, [referenceView.position, target]);
 
-  useEffect(() => {
-    const clearKeys = () => navigationKeys.current.clear();
-    window.addEventListener("blur", clearKeys);
-    return () => window.removeEventListener("blur", clearKeys);
+  const clearInput = useCallback(() => {
+    navigationKeys.current.clear();
+    pilotInput.current.keys.clear();
+    pilotInput.current.pointerDown = false;
+    look.current = null;
   }, []);
 
   useEffect(() => {
-    if (!props.placingDirectionTarget) return;
-    navigationKeys.current.clear();
-    viewer.current?.focus({ preventScroll: true });
+    window.addEventListener("blur", clearInput);
+    return () => window.removeEventListener("blur", clearInput);
+  }, [clearInput]);
+
+  useEffect(() => {
+    clearInput();
+    if (piloting || props.placingTarget)
+      viewer.current?.focus({ preventScroll: true });
+  }, [clearInput, piloting, props.placingTarget]);
+
+  useEffect(() => {
+    if (!props.placingTarget) return;
     const cancelOnEscape = (event: KeyboardEvent) => {
       if (event.key !== "Escape") return;
       event.preventDefault();
-      props.onDirectionTargetCancel();
+      props.onTargetCancel();
     };
     window.addEventListener("keydown", cancelOnEscape);
     return () => window.removeEventListener("keydown", cancelOnEscape);
-  }, [props.onDirectionTargetCancel, props.placingDirectionTarget]);
+  }, [props.onTargetCancel, props.placingTarget]);
 
-  function updateNavigationKey(
-    event: ReactKeyboardEvent<HTMLDivElement>,
-    pressed: boolean,
-  ) {
+  function updateKey(event: ReactKeyboardEvent<HTMLDivElement>, pressed: boolean) {
     const key = event.key.toLowerCase();
-    if (!VIEWER_KEYS.has(key)) return;
+    pilotInput.current.slow = event.shiftKey;
+    if (!pressed) {
+      navigationKeys.current.delete(key);
+      pilotInput.current.keys.delete(key);
+      return;
+    }
+    if (!shouldHandleViewerKey(event)) return;
+    if (piloting) {
+      if (!PILOT_KEYS.has(key)) return;
+      event.preventDefault();
+      pilotInput.current.keys.add(key);
+      return;
+    }
+    if (key === VIEWER_RESET_KEY) {
+      if (!event.repeat && !props.placingTarget) resetView();
+      return;
+    }
+    if (props.placingTarget || !VIEWER_NAVIGATION_KEYS.has(key)) return;
     event.preventDefault();
-    if (pressed) navigationKeys.current.add(key);
-    else navigationKeys.current.delete(key);
+    navigationKeys.current.add(key);
   }
+
+  function startLook(event: ReactPointerEvent<HTMLDivElement>) {
+    if (!piloting || event.button !== 0) return;
+    if ((event.target as Element).closest("button, [data-pilot-ui]")) return;
+    event.currentTarget.setPointerCapture(event.pointerId);
+    look.current = { pointerId: event.pointerId, x: event.clientX, y: event.clientY };
+    pilotInput.current.pointerDown = true;
+  }
+
+  function moveLook(event: ReactPointerEvent<HTMLDivElement>) {
+    const active = look.current;
+    if (!active || active.pointerId !== event.pointerId) return;
+    pilotInput.current.lookX += event.clientX - active.x;
+    pilotInput.current.lookY += event.clientY - active.y;
+    active.x = event.clientX;
+    active.y = event.clientY;
+  }
+
+  function endLook(event: ReactPointerEvent<HTMLDivElement>) {
+    if (look.current?.pointerId !== event.pointerId) return;
+    look.current = null;
+    pilotInput.current.pointerDown = false;
+  }
+
+  const palette = SCENE_PALETTE[props.theme];
+  const shotAspect = props.frameWidth / props.frameHeight;
 
   return (
     <div
       ref={viewer}
       role="application"
       tabIndex={0}
-      aria-label="3D camera path viewer. Drag a camera to move it; drag empty space to rotate. Delete removes the selected camera. Use W A S D to move."
-      aria-describedby={
-        props.placingDirectionTarget ? "look-at-picker-instruction" : undefined
+      aria-label={
+        piloting
+          ? "Camera pilot. W A S D move, Q and E move down and up, drag or use the arrow keys to look, hold Shift for fine moves. I sets a key, Escape exits."
+          : "3D shot viewer. Drag a camera to move it; drag empty space to orbit. W A S D move the view, Q and E move down and up, R resets the view."
       }
-      data-look-at-picker={
-        props.placingDirectionTarget
-          ? "picking"
-          : (props.directionMode === "look_at" ||
-                props.directionMode === "look_away") &&
-              props.directionTarget
-            ? "set"
-            : "idle"
-      }
-      className={`relative h-full w-full focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[#a9bcff]/60 ${props.placingDirectionTarget ? "cursor-crosshair" : ""}`}
-      onPointerDown={(event) =>
-        event.currentTarget.focus({ preventScroll: true })
-      }
-      onKeyDown={(event) => updateNavigationKey(event, true)}
-      onKeyUp={(event) => updateNavigationKey(event, false)}
-      onBlur={() => navigationKeys.current.clear()}
+      data-piloting={piloting || undefined}
+      className={`studio-viewer ${props.placingTarget ? "is-picking" : ""}`}
+      style={{ "--shot-aspect": shotAspect } as React.CSSProperties}
+      onPointerDown={(event) => {
+        event.currentTarget.focus({ preventScroll: true });
+        startLook(event);
+      }}
+      onPointerMove={moveLook}
+      onPointerUp={endLook}
+      onPointerCancel={endLook}
+      onLostPointerCapture={endLook}
+      onKeyDown={(event) => updateKey(event, true)}
+      onKeyUp={(event) => updateKey(event, false)}
+      onBlur={(event) => {
+        if (!event.currentTarget.contains(event.relatedTarget as Node | null))
+          clearInput();
+      }}
     >
-      {!props.previewing && !props.placingDirectionTarget && (
-        <button
-          type="button"
-          title="Reset 3D view"
-          aria-label="Reset 3D view"
-          onPointerDown={(event) => event.stopPropagation()}
-          onClick={() => {
-            navigationKeys.current.clear();
-            setOverviewHome({
-              position: buildOverviewPosition(
-                referenceView.position,
-                target,
-                segments,
-              ),
-            });
-          }}
-          className="absolute left-1/2 top-3 z-30 flex h-9 -translate-x-1/2 items-center gap-1.5 rounded-md border border-white/15 bg-[#0b0c0f]/90 px-3 text-[11px] font-semibold uppercase tracking-[0.08em] text-white/65 shadow-lg backdrop-blur transition hover:border-white/30 hover:bg-[#17181d] hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#a9bcff] active:translate-y-px"
-        >
-          <RotateCcw className="h-3.5 w-3.5" />
-          Reset view
-        </button>
-      )}
-      {props.placingDirectionTarget && (
-        <div className="pointer-events-none absolute left-1/2 top-3 z-30 flex -translate-x-1/2 items-center gap-2 rounded-lg border border-[#f4b860]/40 bg-[#0b0c0f]/95 p-1.5 pl-3 text-xs font-semibold text-[#ffd18d] shadow-xl backdrop-blur">
-          <span id="look-at-picker-instruction">
-            {props.placingDirectionTargetMode === "look_away"
-              ? "Click the point to look away from"
-              : "Click the point to look at"}
-          </span>
+      <Canvas
+        className="studio-viewer-canvas"
+        camera={{
+          position: overviewHome.position,
+          fov: OVERVIEW_FOV,
+          near: 0.01,
+          far: 1000,
+        }}
+        dpr={[1, 1.5]}
+        gl={{ antialias: true }}
+      >
+        <ClearColor color={palette.background} />
+        <ShotScene
+          {...props}
+          target={target}
+          overviewHome={overviewHome}
+          resetVersion={resetVersion}
+          navigationKeys={navigationKeys}
+          pilotInput={pilotInput}
+          gizmo={gizmo}
+        />
+      </Canvas>
+
+      {!piloting && !props.placingTarget && (
+        <nav aria-label="View" className="studio-float studio-view-tools">
+          <svg ref={gizmo} className="studio-gizmo" viewBox="-30 -30 60 60" aria-hidden>
+            <circle r="28" className="studio-gizmo-disc" />
+            {(["x", "y", "z"] as const).map((axis) => (
+              <g key={axis} data-axis={axis}>
+                <line x1="0" y1="0" x2="0" y2="0" />
+                <circle r="6.5" />
+                <text dy="3.2">{axis.toUpperCase()}</text>
+              </g>
+            ))}
+          </svg>
           <button
             type="button"
+            className="studio-icon-button"
+            title="Pilot the shot camera (C)"
+            aria-label="Pilot the shot camera"
             onPointerDown={(event) => event.stopPropagation()}
-            onClick={props.onDirectionTargetCancel}
-            className="pointer-events-auto h-7 rounded border border-white/15 px-2 text-[10px] text-white/65 transition hover:bg-white/10 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#f4b860]"
+            onClick={props.onPilotStart}
+          >
+            <Video className="h-4 w-4" />
+          </button>
+          <button
+            type="button"
+            className="studio-icon-button"
+            title="Frame scene and path (R)"
+            aria-label="Frame scene and path"
+            onPointerDown={(event) => event.stopPropagation()}
+            onClick={resetView}
+          >
+            <Focus className="h-4 w-4" />
+          </button>
+        </nav>
+      )}
+
+      {props.placingTarget && (
+        <div className="studio-float studio-picker-banner">
+          <span id="look-at-picker-instruction">Click the point to look at</span>
+          <button
+            type="button"
+            className="studio-button is-small"
+            onPointerDown={(event) => event.stopPropagation()}
+            onClick={props.onTargetCancel}
           >
             Cancel
           </button>
         </div>
       )}
-      <Canvas
-        className={`h-full w-full ${props.addingPivot || props.placingDirectionTarget ? "cursor-crosshair" : "cursor-grab active:cursor-grabbing"}`}
-        camera={{
-          position: overviewHome.position,
-          fov: 50,
-          near: 0.01,
-          far: 1000,
-        }}
-        dpr={[1, 1.5]}
-        gl={{ antialias: false }}
-        onCreated={({ gl }) => gl.setClearColor("#111216")}
-      >
-        <CameraTrajectoryScene
-          {...props}
-          target={target}
-          overviewHome={overviewHome}
-          navigationKeys={navigationKeys}
+
+      {piloting && (
+        <PilotHud
+          playhead={props.playhead}
+          pending={props.pendingPose !== null}
+          aimMode={props.aimMode}
+          input={pilotInput}
+          onSetKey={props.onSetKey}
+          onExit={props.onPilotExit}
         />
-      </Canvas>
+      )}
     </div>
   );
 }
 
-export function CameraPointCloudView({
-  pose,
-  view,
-}: {
-  pose: PosedView;
-  view: CameraView;
-}) {
-  return (
-    <Canvas
-      className="pointer-events-none h-full w-full"
-      camera={{
-        position: view.position,
-        fov: THREE.MathUtils.radToDeg(view.fovRadians),
-        near: 0.01,
-        far: 1000,
-      }}
-      dpr={[1, 1.5]}
-      frameloop="demand"
-      gl={{ antialias: false }}
-      onCreated={({ gl }) => gl.setClearColor("#090a0d")}
-    >
-      <PosedPointCloud pose={pose} scaleMultiplier={0.7} />
-      <CameraPointCloudViewCamera view={view} />
-    </Canvas>
-  );
-}
-
-function CameraPointCloudViewCamera({ view }: { view: CameraView }) {
-  const camera = useThree((state) => state.camera);
+function ClearColor({ color }: { color: string }) {
+  const gl = useThree((state) => state.gl);
   const invalidate = useThree((state) => state.invalidate);
-
   useEffect(() => {
-    if (!(camera instanceof THREE.PerspectiveCamera)) return;
-    camera.position.set(...view.position);
-    camera.quaternion.set(...view.quaternion);
-    camera.fov = THREE.MathUtils.radToDeg(view.fovRadians);
-    camera.updateProjectionMatrix();
-    camera.updateMatrixWorld();
-
+    gl.setClearColor(color);
     invalidate();
-  }, [camera, invalidate, view]);
-
+  }, [color, gl, invalidate]);
   return null;
 }
 
-function CameraTrajectoryScene({
+function PilotHud({
+  playhead,
+  pending,
+  aimMode,
+  input,
+  onSetKey,
+  onExit,
+}: {
+  playhead: Playhead;
+  pending: boolean;
+  aimMode: CameraAimMode;
+  input: RefObject<PilotInput>;
+  onSetKey: () => void;
+  onExit: () => void;
+}) {
+  const frame = usePlayheadWholeFrame(playhead);
+  const hold = (key: string) => ({
+    onPointerDown: (event: ReactPointerEvent<HTMLButtonElement>) => {
+      event.stopPropagation();
+      event.currentTarget.setPointerCapture(event.pointerId);
+      input.current.keys.add(key);
+    },
+    onPointerUp: () => input.current.keys.delete(key),
+    onPointerCancel: () => input.current.keys.delete(key),
+    onLostPointerCapture: () => input.current.keys.delete(key),
+  });
+  return (
+    <div className="pilot-hud">
+      <div className="pilot-frame" aria-hidden>
+        <span />
+        <span />
+        <span />
+        <span />
+        <i />
+      </div>
+      <div className="pilot-bar studio-float" data-pilot-ui>
+        <span className="pilot-badge">
+          <i />
+          Piloting
+        </span>
+        <span className="pilot-time">F{frame}</span>
+        <button
+          type="button"
+          className={`studio-button is-small ${pending ? "is-accent" : ""}`}
+          onClick={onSetKey}
+          title="Set a key at this frame (I)"
+        >
+          <Diamond className="h-3.5 w-3.5" />
+          {pending ? "Set key" : "Key"}
+        </button>
+        <button
+          type="button"
+          className="studio-icon-button is-small"
+          onClick={onExit}
+          title="Finish piloting (Esc)"
+          aria-label="Finish piloting"
+        >
+          <X className="h-4 w-4" />
+        </button>
+      </div>
+      <div className="pilot-hints studio-float" data-pilot-ui>
+        <span>
+          <kbd>W</kbd>
+          <kbd>A</kbd>
+          <kbd>S</kbd>
+          <kbd>D</kbd> move
+        </span>
+        <span>
+          <kbd>Q</kbd>
+          <kbd>E</kbd> down / up
+        </span>
+        <span>{aimMode === "free" ? "Drag to look" : "Aim follows the shot's aim"}</span>
+        <span>
+          <kbd>Shift</kbd> fine
+        </span>
+        <span>
+          <kbd>I</kbd> set key
+        </span>
+      </div>
+      <div className="pilot-pad" data-pilot-ui>
+        <button type="button" aria-label="Move forward" {...hold("w")}>
+          <ArrowUp className="h-4 w-4" />
+        </button>
+        <button type="button" aria-label="Move left" {...hold("a")}>
+          <ArrowLeft className="h-4 w-4" />
+        </button>
+        <button type="button" aria-label="Move back" {...hold("s")}>
+          <ArrowDown className="h-4 w-4" />
+        </button>
+        <button type="button" aria-label="Move right" {...hold("d")}>
+          <ArrowRight className="h-4 w-4" />
+        </button>
+        <button type="button" aria-label="Move up" {...hold("e")}>
+          <ChevronsUp className="h-4 w-4" />
+        </button>
+        <button type="button" aria-label="Move down" {...hold("q")}>
+          <ChevronsDown className="h-4 w-4" />
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function ShotScene({
   pose,
   referenceView,
-  views,
-  segments,
-  selectedPivot,
-  addingPivot,
-  previewing,
-  disabled,
-  frameCount,
-  previewSeconds,
+  curve,
+  playhead,
+  selectedKeyId,
+  fovRadians,
   frameWidth,
   frameHeight,
-  directionMode,
-  directionTarget,
-  directionTargetCandidates,
-  placingDirectionTarget,
-  closedLoop,
+  aimMode,
+  aimTarget,
   allowBelowFloor,
-  onPreviewDone,
-  onDrawingViewChange,
-  onPointChange,
-  onPointSelect,
-  onPivotAdd,
-  onDirectionTargetChange,
-  onDirectionTargetMiss,
+  theme,
+  fill,
+  sceneRadius,
+  piloting,
+  pendingPose,
+  targetCandidates,
+  placingTarget,
+  onKeySelect,
+  onKeyMove,
+  onLiveCameraMove,
+  onPilotPose,
+  onTargetPick,
+  onTargetMiss,
   target,
   overviewHome,
+  resetVersion,
   navigationKeys,
-}: CameraTrajectoryCanvasProps & {
-  target: [number, number, number];
-  overviewHome: { position: [number, number, number] };
+  pilotInput,
+  gizmo,
+}: ViewportProps & {
+  target: TrajectoryPoint;
+  overviewHome: { position: TrajectoryPoint };
+  resetVersion: number;
   navigationKeys: RefObject<Set<string>>;
+  pilotInput: RefObject<PilotInput>;
+  gizmo: RefObject<SVGSVGElement | null>;
 }) {
+  const palette = SCENE_PALETTE[theme];
   const overviewCamera = useThree((state) => state.camera);
   const controls = useRef<OrbitControlsImpl>(null);
-  const [draggingHandle, setDraggingHandle] = useState(false);
-  const lastReportedQuaternion = useRef<THREE.Quaternion | null>(null);
-  const navigationForward = useRef(new THREE.Vector3()).current;
-  const navigationRight = useRef(new THREE.Vector3()).current;
-  const navigationMovement = useRef(new THREE.Vector3()).current;
-  const linePoints = useMemo(
-    () =>
-      sampleCameraPath(views, PATH_SAMPLES, {
-        directionMode,
-        directionTarget: directionTarget ?? pose.centroidWorld,
-        closedLoop,
-        allowBelowFloor,
-      }).map((view) => view.position),
-    [
-      allowBelowFloor,
-      closedLoop,
-      directionMode,
-      directionTarget,
-      pose.centroidWorld,
-      views,
-    ],
-  );
-  const pivotViews = useMemo(
-    () =>
-      views.map((view, index) => ({
-        ...view,
-        ...sampleCameraPivot(views, index, {
-          directionMode,
-          directionTarget: directionTarget ?? pose.centroidWorld,
-          closedLoop,
-          allowBelowFloor,
-        }),
-      })),
-    [
-      views,
-      directionMode,
-      directionTarget,
-      pose.centroidWorld,
-      closedLoop,
-      allowBelowFloor,
-    ],
-  );
-  const partDirectionTargets = useMemo(
-    () =>
-      segments.flatMap((segment, index) =>
-        segment.look_at_target
-          ? [
-              {
-                key: `${segment.id}:${segment.look_at_target.join(":")}`,
-                position: segment.look_at_target,
-                label: `Part ${index + 1} target`,
-              },
-            ]
-          : [],
-      ),
-    [segments],
-  );
+  const [dragging, setDragging] = useState(false);
+  const movement = useRef(new THREE.Vector3()).current;
   const markerDepth = Math.max(
     0.12,
     new THREE.Vector3(...referenceView.position).distanceTo(
@@ -362,314 +533,907 @@ function CameraTrajectoryScene({
     ) * 0.12,
   );
 
+  useEffect(() => {
+    if (dragging || placingTarget) navigationKeys.current.clear();
+  }, [dragging, navigationKeys, placingTarget]);
+
   useFrame((_, delta) => {
-    const activeControls = controls.current;
+    const active = controls.current;
+    if (!active || piloting || dragging || placingTarget) return;
     const keys = navigationKeys.current;
-    if (
-      !activeControls ||
-      previewing ||
-      draggingHandle ||
-      addingPivot ||
-      placingDirectionTarget ||
-      keys.size === 0
-    ) {
-      return;
-    }
-
-    navigationForward.set(0, 0, -1).applyQuaternion(overviewCamera.quaternion);
-    navigationForward.y = 0;
-    if (navigationForward.lengthSq() < 1e-8) {
-      navigationForward.set(0, 1, 0).applyQuaternion(overviewCamera.quaternion);
-      navigationForward.y = 0;
-    }
-    navigationRight.set(1, 0, 0).applyQuaternion(overviewCamera.quaternion);
-    navigationRight.y = 0;
-    if (
-      navigationForward.lengthSq() < 1e-8 ||
-      navigationRight.lengthSq() < 1e-8
-    ) {
-      return;
-    }
-    navigationForward.normalize();
-    navigationRight.normalize();
-    navigationMovement.set(0, 0, 0);
-    if (keys.has("w")) navigationMovement.add(navigationForward);
-    if (keys.has("s")) navigationMovement.sub(navigationForward);
-    if (keys.has("d")) navigationMovement.add(navigationRight);
-    if (keys.has("a")) navigationMovement.sub(navigationRight);
-    if (navigationMovement.lengthSq() === 0) return;
-
-    navigationMovement
-      .normalize()
-      .multiplyScalar(
-        Math.max(activeControls.getDistance(), 1) * 0.8 * Math.min(delta, 0.1),
-      );
-    overviewCamera.position.add(navigationMovement);
-    activeControls.target.add(navigationMovement);
-    activeControls.update();
+    if (keys.size === 0) return;
+    const step = viewerMovementFromKeys(keys, overviewCamera.quaternion, movement);
+    if (step.lengthSq() === 0) return;
+    step.multiplyScalar(viewerKeyStep(active.getDistance(), delta));
+    overviewCamera.position.add(step);
+    active.target.add(step);
+    active.update();
   });
 
   return (
     <>
-      <OverviewCamera
-        home={overviewHome}
-        target={target}
-        controls={controls}
-        onDrawingViewChange={onDrawingViewChange}
+      <OverviewCamera home={overviewHome} target={target} controls={controls} />
+      <ViewGizmo svg={gizmo} />
+      {piloting && (
+        <PilotController
+          curve={curve}
+          playhead={playhead}
+          pendingPose={pendingPose}
+          aimMode={aimMode}
+          aimTarget={aimTarget}
+          allowBelowFloor={allowBelowFloor}
+          fovRadians={fovRadians}
+          shotAspect={frameWidth / frameHeight}
+          speed={Math.max(0.6, sceneRadius * 0.45)}
+          input={pilotInput}
+          onPose={onPilotPose}
+        />
+      )}
+
+      <Grid
+        args={[100, 100]}
+        position={[0, -0.002, 0]}
+        cellSize={1}
+        cellThickness={0.6}
+        cellColor={palette.gridCell}
+        sectionSize={5}
+        sectionThickness={1}
+        sectionColor={palette.gridSection}
+        infiniteGrid
+        fadeDistance={40}
+        fadeStrength={2}
       />
 
-      {!previewing && (
-        <Grid
-          args={[100, 100]}
-          position={[0, -0.002, 0]}
-          cellSize={0.5}
-          cellThickness={0.5}
-          cellColor="#292b31"
-          sectionSize={2.5}
-          sectionThickness={0.8}
-          sectionColor="#3a3d45"
-          infiniteGrid
-          fadeDistance={30}
-          fadeStrength={1.5}
+      <PosedPointCloud pose={pose} scaleMultiplier={1} fill={fill} />
+
+      {aimMode === "look_at" && aimTarget && (
+        <DirectionTargetMarker
+          hidden={piloting}
+          position={aimTarget}
+          label="Look target"
         />
       )}
 
-      <PosedPointCloud pose={pose} scaleMultiplier={1} />
-
-      {(directionMode === "look_at" || directionMode === "look_away") &&
-        directionTarget &&
-        !previewing && (
-          <DirectionTargetMarker
-            position={directionTarget}
-            label={directionMode === "look_at" ? "Look target" : "Away target"}
-          />
-        )}
-
-      {!previewing &&
-        partDirectionTargets.map((partTarget) => (
-          <DirectionTargetMarker
-            key={partTarget.key}
-            position={partTarget.position}
-            label={partTarget.label}
-          />
-        ))}
-
-      {placingDirectionTarget && (
+      {placingTarget && (
         <DirectionTargetPicker
-          candidates={directionTargetCandidates}
-          onChange={onDirectionTargetChange}
-          onMiss={onDirectionTargetMiss}
+          candidates={targetCandidates}
+          onChange={onTargetPick}
+          onMiss={onTargetMiss}
         />
       )}
 
-      {!previewing && linePoints.length >= 2 && (
-        <>
-          <Line
-            points={linePoints}
-            color={addingPivot ? "#c0cdff" : "#8ca8ff"}
-            lineWidth={addingPivot ? 4 : 2.5}
-            transparent
-            opacity={addingPivot ? 1 : 0.9}
-          />
-          {addingPivot && (
-            <Line
-              points={linePoints}
-              color="#ffffff"
-              lineWidth={18}
-              transparent
-              opacity={0.001}
-              onClick={(event) => {
-                event.stopPropagation();
-                const point = event.pointOnLine ?? event.point;
-                const lineIndex = THREE.MathUtils.clamp(
-                  event.faceIndex ?? 0,
-                  0,
-                  linePoints.length - 2,
-                );
-                const startProgress = cameraPathProgressAtFrame(
-                  lineIndex,
-                  PATH_SAMPLES,
-                  views.length,
-                  closedLoop,
-                );
-                const endProgress = cameraPathProgressAtFrame(
-                  lineIndex + 1,
-                  PATH_SAMPLES,
-                  views.length,
-                  closedLoop,
-                );
-                onPivotAdd(point.toArray(), (startProgress + endProgress) / 2);
-              }}
-            />
-          )}
-        </>
-      )}
+      <ShotPath curve={curve} casing={palette.casing} tick={palette.key} />
 
-      {!previewing && !placingDirectionTarget && (
-        <TrajectoryHandles
-          segments={segments}
-          views={pivotViews}
+      {/* Hidden rather than unmounted: drei's Html labels do not survive
+          unmounting mid-render. */}
+      <KeyframeHandles
+          hidden={piloting || placingTarget}
+          curve={curve}
           markerDepth={markerDepth}
+          fovRadians={fovRadians}
           frameWidth={frameWidth}
           frameHeight={frameHeight}
-          selectedPivot={selectedPivot}
-          disabled={disabled || addingPivot}
+          selectedKeyId={selectedKeyId}
+          idleColor={palette.keyIdle}
           allowBelowFloor={allowBelowFloor}
-          onChange={onPointChange}
-          onSelect={onPointSelect}
-          onDraggingChange={setDraggingHandle}
+          onMove={onKeyMove}
+          onSelect={onKeySelect}
+          onDraggingChange={setDragging}
+        />
+
+      {!piloting && (
+        <LiveCamera
+          curve={curve}
+          playhead={playhead}
+          markerDepth={markerDepth}
+          fovRadians={fovRadians}
+          frameWidth={frameWidth}
+          frameHeight={frameHeight}
+          allowBelowFloor={allowBelowFloor}
+          disabled={placingTarget}
+          onMove={onLiveCameraMove}
+          onDraggingChange={setDragging}
         />
       )}
 
-      {!previewing && (
-        <>
-          <FrustumObject
-            camera={{
-              intrinsics: frameIntrinsics(
-                referenceView.fovRadians,
-                frameWidth,
-                frameHeight,
-              ),
-              extrinsics: {
-                position: referenceView.position,
-                quaternion: referenceView.quaternion,
-              },
-            }}
-            color="#f4b860"
-            depth={markerDepth * 0.75}
-            overlay
-          />
-          <Html
-            position={referenceView.position}
-            center
-            zIndexRange={[20, 0]}
-            className="pointer-events-none"
-          >
-            <div className="whitespace-nowrap rounded border border-[#f4b860]/50 bg-[#17181d]/90 px-2 py-1 text-[10px] font-semibold text-[#f4b860] shadow-lg backdrop-blur">
-              Reference · not in path
-            </div>
-          </Html>
-        </>
-      )}
-
-      {views.length >= 2 && (
-        <PreviewCamera
-          views={views}
-          previewing={previewing}
-          frameCount={frameCount}
-          previewSeconds={previewSeconds}
-          aspectRatio={frameWidth / frameHeight}
-          directionMode={directionMode}
-          directionTarget={directionTarget ?? pose.centroidWorld}
-          closedLoop={closedLoop}
-          allowBelowFloor={allowBelowFloor}
-          onDone={onPreviewDone}
-        />
-      )}
+      <SourceCameraMarker
+        hidden={piloting}
+        view={referenceView}
+        depth={markerDepth}
+        color={palette.source}
+        frameWidth={frameWidth}
+        frameHeight={frameHeight}
+      />
 
       <OrbitControls
+        key={resetVersion}
         ref={controls}
         makeDefault
-        enabled={
-          !previewing &&
-          !draggingHandle &&
-          !addingPivot &&
-          !placingDirectionTarget
-        }
+        enabled={!piloting && !dragging && !placingTarget}
         target={target}
-        enablePan={false}
-        enableDamping
-        dampingFactor={0.08}
+        enablePan
+        screenSpacePanning
+        enableDamping={false}
         maxPolarAngle={Math.PI - 0.01}
-        onChange={() => {
-          const previous = lastReportedQuaternion.current;
-          if (
-            previous &&
-            1 - Math.abs(previous.dot(overviewCamera.quaternion)) < 1e-6
-          ) {
-            return;
-          }
-          lastReportedQuaternion.current = overviewCamera.quaternion.clone();
-          onDrawingViewChange(
-            cameraDrawingView(overviewCamera.quaternion.toArray()),
-          );
-        }}
       />
     </>
   );
 }
 
-function SelectedCameraDirection({
-  view,
-  depth,
-  aspectRatio,
-}: {
-  view: CameraView;
-  depth: number;
-  aspectRatio: number;
-}) {
-  const outlineSegments = useMemo(() => {
-    const halfHeight = Math.tan(view.fovRadians / 2) * depth;
-    const halfWidth = halfHeight * aspectRatio;
-    const apex: TrajectoryPoint = [0, 0, 0];
-    const corners: TrajectoryPoint[] = [
-      [-halfWidth, halfHeight, -depth],
-      [halfWidth, halfHeight, -depth],
-      [halfWidth, -halfHeight, -depth],
-      [-halfWidth, -halfHeight, -depth],
-    ];
-    return [
-      ...corners.map((corner) => [apex, corner] as const),
-      [...corners, corners[0]!] as TrajectoryPoint[],
-    ];
-  }, [aspectRatio, depth, view.fovRadians]);
+/** Points the corner axis widget the way the view camera faces. */
+function ViewGizmo({ svg }: { svg: RefObject<SVGSVGElement | null> }) {
+  const inverse = useRef(new THREE.Quaternion()).current;
+  const axis = useRef(new THREE.Vector3()).current;
+  useFrame(({ camera }) => {
+    const root = svg.current;
+    if (!root) return;
+    inverse.copy(camera.quaternion).invert();
+    const groups = root.querySelectorAll<SVGGElement>("g[data-axis]");
+    groups.forEach((group) => {
+      const name = group.dataset.axis;
+      axis
+        .set(name === "x" ? 1 : 0, name === "y" ? 1 : 0, name === "z" ? 1 : 0)
+        .applyQuaternion(inverse);
+      const x = (axis.x * 19).toFixed(2);
+      const y = (-axis.y * 19).toFixed(2);
+      const line = group.querySelector("line");
+      line?.setAttribute("x2", x);
+      line?.setAttribute("y2", y);
+      group.querySelector("circle")?.setAttribute("cx", x);
+      group.querySelector("circle")?.setAttribute("cy", y);
+      group.querySelector("text")?.setAttribute("x", x);
+      group.querySelector("text")?.setAttribute("y", y);
+      group.style.opacity = axis.z < -0.2 ? "0.45" : "1";
+    });
+  });
+  return null;
+}
 
+function PilotController({
+  curve,
+  playhead,
+  pendingPose,
+  aimMode,
+  aimTarget,
+  allowBelowFloor,
+  fovRadians,
+  shotAspect,
+  speed,
+  input,
+  onPose,
+}: {
+  curve: ShotCurve;
+  playhead: Playhead;
+  pendingPose: PilotPose | null;
+  aimMode: CameraAimMode;
+  aimTarget: TrajectoryPoint | null;
+  allowBelowFloor: boolean;
+  fovRadians: number;
+  shotAspect: number;
+  speed: number;
+  input: RefObject<PilotInput>;
+  onPose: (pose: PilotPose) => void;
+}) {
+  const camera = useThree((state) => state.camera) as THREE.PerspectiveCamera;
+  const live = useRef<PilotPose | null>(null);
+  const moving = useRef(false);
+  // After a gesture, keep the pose we reported until the editor echoes it.
+  const awaitingEcho = useRef(false);
+  const movement = useRef(new THREE.Vector3()).current;
+  const rotation = useRef(new THREE.Quaternion()).current;
+  const looker = useRef(new THREE.Object3D()).current;
+
+  useEffect(() => {
+    const saved = {
+      position: camera.position.clone(),
+      quaternion: camera.quaternion.clone(),
+      fov: camera.fov,
+    };
+    return () => {
+      camera.position.copy(saved.position);
+      camera.quaternion.copy(saved.quaternion);
+      camera.fov = saved.fov;
+      camera.updateProjectionMatrix();
+    };
+  }, [camera]);
+
+  useEffect(() => {
+    awaitingEcho.current = false;
+  }, [pendingPose, curve]);
+
+  function aimAt(pose: PilotPose, frame: number): THREE.Quaternion {
+    if (aimMode === "look_at" && aimTarget) {
+      looker.position.set(...pose.position);
+      looker.up.set(0, 1, 0);
+      // Object3D.lookAt points +z at the target; cameras look down -z.
+      looker.lookAt(
+        2 * pose.position[0] - aimTarget[0],
+        2 * pose.position[1] - aimTarget[1],
+        2 * pose.position[2] - aimTarget[2],
+      );
+      return rotation.copy(looker.quaternion);
+    }
+    if (aimMode === "forward")
+      return rotation.set(...curve.poseAt(frame).quaternion);
+    return rotation.set(...cameraQuaternionFromAim(pose.yaw, pose.pitch));
+  }
+
+  useFrame(({ size }, delta) => {
+    const state = input.current;
+    const frame = playhead.frame;
+    const hasInput =
+      state.keys.size > 0 ||
+      state.pointerDown ||
+      state.lookX !== 0 ||
+      state.lookY !== 0;
+    if (hasInput && playhead.playing) playhead.pause();
+
+    if (!hasInput && !moving.current && !awaitingEcho.current) {
+      const source = pendingPose ?? curve.poseAt(frame);
+      live.current = {
+        position: [...source.position],
+        yaw: source.yaw,
+        pitch: source.pitch,
+      };
+    }
+    if (!live.current) {
+      const source = curve.poseAt(frame);
+      live.current = {
+        position: [...source.position],
+        yaw: source.yaw,
+        pitch: source.pitch,
+      };
+    }
+    const pose = live.current;
+
+    if (hasInput) {
+      moving.current = true;
+      const dt = Math.min(Math.max(delta, 0), 0.1);
+      if (aimMode === "free") {
+        const turnX =
+          (state.keys.has("arrowright") ? 1 : 0) -
+          (state.keys.has("arrowleft") ? 1 : 0);
+        const turnY =
+          (state.keys.has("arrowup") ? 1 : 0) -
+          (state.keys.has("arrowdown") ? 1 : 0);
+        const fine = state.slow ? 0.35 : 1;
+        pose.yaw +=
+          (state.lookX * PILOT_LOOK_SENSITIVITY +
+            turnX * PILOT_TURN_SPEED * dt) *
+          fine;
+        pose.pitch = THREE.MathUtils.clamp(
+          pose.pitch +
+            (-state.lookY * PILOT_LOOK_SENSITIVITY +
+              turnY * PILOT_TURN_SPEED * dt) *
+              fine,
+          -85,
+          85,
+        );
+      }
+      state.lookX = 0;
+      state.lookY = 0;
+      const step = viewerMovementFromKeys(
+        state.keys,
+        aimAt(pose, frame),
+        movement,
+      );
+      if (step.lengthSq() > 0) {
+        step.multiplyScalar(speed * dt * (state.slow ? 0.25 : 1));
+        pose.position = [
+          pose.position[0] + step.x,
+          allowBelowFloor
+            ? pose.position[1] + step.y
+            : Math.max(TRAJECTORY_FLOOR_Y, pose.position[1] + step.y),
+          pose.position[2] + step.z,
+        ];
+      }
+    } else if (moving.current) {
+      moving.current = false;
+      awaitingEcho.current = true;
+      const quaternion = aimAt(pose, frame);
+      const aim =
+        aimMode === "free"
+          ? { yaw: pose.yaw, pitch: pose.pitch }
+          : cameraAimDegrees(quaternion.toArray() as TrajectoryQuaternion);
+      onPose({ position: [...pose.position], ...aim });
+    }
+
+    camera.position.set(...pose.position);
+    camera.quaternion.copy(aimAt(pose, frame));
+    // Keep the whole shot frame on screen in narrow viewports.
+    const viewAspect = size.width / Math.max(1, size.height);
+    const vertical =
+      viewAspect >= shotAspect
+        ? fovRadians
+        : 2 * Math.atan((Math.tan(fovRadians / 2) * shotAspect) / viewAspect);
+    const fov = THREE.MathUtils.radToDeg(vertical);
+    if (Math.abs(camera.fov - fov) > 1e-4) {
+      camera.fov = fov;
+      camera.updateProjectionMatrix();
+    }
+    camera.updateMatrixWorld();
+  });
+
+  return null;
+}
+
+function ShotPath({
+  curve,
+  casing,
+  tick,
+}: {
+  curve: ShotCurve;
+  casing: string;
+  tick: string;
+}) {
+  const keys = curve.keyframes;
+  const { points, colors, ticks } = useMemo(() => {
+    if (keys.length < 2)
+      return { points: [], colors: [], ticks: new Float32Array() };
+    const first = keys[0]!.frame;
+    const last = keys.at(-1)!.frame;
+    const start = new THREE.Color(PATH_START);
+    const end = new THREE.Color(PATH_END);
+    const points: TrajectoryPoint[] = [];
+    const colors: [number, number, number][] = [];
+    for (let i = 0; i <= PATH_SAMPLES; i++) {
+      const t = i / PATH_SAMPLES;
+      points.push(curve.positionAt(first + (last - first) * t));
+      const color = start.clone().lerp(end, t);
+      colors.push([color.r, color.g, color.b]);
+    }
+    const ticks: number[] = [];
+    for (let frame = Math.ceil(first); frame <= last; frame++)
+      ticks.push(...curve.positionAt(frame));
+    return { points, colors, ticks: new Float32Array(ticks) };
+  }, [curve, keys]);
+  const tickGeometry = useMemo(() => {
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute("position", new THREE.BufferAttribute(ticks, 3));
+    return geometry;
+  }, [ticks]);
+  useEffect(() => () => tickGeometry.dispose(), [tickGeometry]);
+  if (points.length < 2) return null;
+  return (
+    <group>
+      {/* Drawn over the scene, like a motion path, so it never gets lost
+          behind the cloud. */}
+      <Line
+        points={points}
+        color={casing}
+        lineWidth={7}
+        transparent
+        opacity={0.85}
+        depthTest={false}
+        depthWrite={false}
+        renderOrder={4}
+        raycast={() => undefined}
+      />
+      <Line
+        points={points}
+        color="#ffffff"
+        vertexColors={colors}
+        lineWidth={3.5}
+        transparent
+        depthTest={false}
+        depthWrite={false}
+        renderOrder={5}
+        raycast={() => undefined}
+      />
+      {/* One dot per frame: spacing shows where the camera speeds up. */}
+      <points geometry={tickGeometry} renderOrder={6} raycast={() => undefined}>
+        <pointsMaterial
+          color={tick}
+          size={3.5}
+          sizeAttenuation={false}
+          transparent
+          opacity={0.6}
+          depthTest={false}
+          depthWrite={false}
+          toneMapped={false}
+        />
+      </points>
+    </group>
+  );
+}
+
+function OverviewCamera({
+  home,
+  target,
+  controls,
+}: {
+  home: { position: TrajectoryPoint };
+  target: TrajectoryPoint;
+  controls: RefObject<OrbitControlsImpl | null>;
+}) {
+  const camera = useRef(useThree((state) => state.camera)).current;
+
+  useEffect(() => {
+    camera.position.set(...home.position);
+    camera.lookAt(...target);
+    if (controls.current) {
+      controls.current.target.set(...target);
+      controls.current.update();
+    }
+    camera.updateMatrixWorld();
+  }, [camera, controls, home, target]);
+
+  return null;
+}
+
+/** Drag a camera marker on the plane facing the view. */
+function useMarkerDrag({
+  getPosition,
+  allowBelowFloor,
+  disabled,
+  onStart,
+  onChange,
+  onDraggingChange,
+}: {
+  getPosition: () => TrajectoryPoint;
+  allowBelowFloor: boolean;
+  disabled: boolean;
+  onStart?: () => void;
+  onChange: (position: TrajectoryPoint) => void;
+  onDraggingChange: (dragging: boolean) => void;
+}) {
+  const orbitControls = useThree(
+    (state) => state.controls,
+  ) as OrbitControlsImpl | null;
+  const canvas = useThree((state) => state.gl.domElement);
+  const [hovered, setHovered] = useState(false);
+  const [dragging, setDragging] = useState(false);
+  const drag = useRef<{
+    pointerId: number;
+    plane: THREE.Plane;
+    grabOffset: THREE.Vector3;
+    startPosition: TrajectoryPoint;
+  } | null>(null);
+
+  useEffect(
+    () => () => {
+      if (drag.current) onDraggingChange(false);
+      canvas.style.cursor = "";
+    },
+    [canvas, onDraggingChange],
+  );
+
+  function finish(event: ThreeEvent<PointerEvent>) {
+    const active = drag.current;
+    if (!active || active.pointerId !== event.pointerId) return;
+    event.stopPropagation();
+    drag.current = null;
+    setDragging(false);
+    onDraggingChange(false);
+    if (orbitControls) orbitControls.enabled = true;
+    canvas.style.cursor = hovered ? "grab" : "";
+    const target = event.target as Element;
+    if (target.hasPointerCapture(event.pointerId))
+      target.releasePointerCapture(event.pointerId);
+  }
+
+  return {
+    hovered,
+    dragging,
+    handlers: {
+      onPointerDown(event: ThreeEvent<PointerEvent>) {
+        if (disabled || event.button !== 0 || drag.current) return;
+        event.stopPropagation();
+        event.nativeEvent.stopImmediatePropagation();
+        const position = getPosition();
+        const worldPosition = new THREE.Vector3(...position);
+        const plane = new THREE.Plane().setFromNormalAndCoplanarPoint(
+          event.camera.getWorldDirection(new THREE.Vector3()),
+          worldPosition,
+        );
+        const intersection = event.ray.intersectPlane(plane, new THREE.Vector3());
+        if (!intersection) return;
+        if (orbitControls) orbitControls.enabled = false;
+        onStart?.();
+        (event.target as Element).setPointerCapture(event.pointerId);
+        drag.current = {
+          pointerId: event.pointerId,
+          plane,
+          grabOffset: intersection.sub(worldPosition),
+          startPosition: [...position],
+        };
+        canvas.style.cursor = "grabbing";
+        setDragging(true);
+        onDraggingChange(true);
+      },
+      onPointerMove(event: ThreeEvent<PointerEvent>) {
+        const active = drag.current;
+        if (!active || active.pointerId !== event.pointerId) return;
+        event.stopPropagation();
+        const intersection = event.ray.intersectPlane(
+          active.plane,
+          new THREE.Vector3(),
+        );
+        if (!intersection) return;
+        intersection.sub(active.grabOffset);
+        if (!allowBelowFloor)
+          intersection.y = Math.max(TRAJECTORY_FLOOR_Y, intersection.y);
+        onChange(intersection.toArray());
+      },
+      onPointerUp: finish,
+      onPointerCancel(event: ThreeEvent<PointerEvent>) {
+        const active = drag.current;
+        if (!active || active.pointerId !== event.pointerId) return;
+        onChange(active.startPosition);
+        finish(event);
+      },
+      onLostPointerCapture(event: ThreeEvent<PointerEvent>) {
+        finish(event);
+      },
+      onPointerOver(event: ThreeEvent<PointerEvent>) {
+        event.stopPropagation();
+        setHovered(true);
+        if (!drag.current && !disabled) canvas.style.cursor = "grab";
+      },
+      onPointerOut() {
+        setHovered(false);
+        if (!drag.current) canvas.style.cursor = "";
+      },
+    },
+  };
+}
+
+function useScreenConstantScale(
+  group: RefObject<THREE.Group | null>,
+  markerDepth: number,
+) {
+  useFrame(({ camera, size }) => {
+    if (!group.current || !(camera instanceof THREE.PerspectiveCamera)) return;
+    const distance = camera.position.distanceTo(group.current.position);
+    const worldHeight =
+      2 * distance * Math.tan(THREE.MathUtils.degToRad(camera.fov) / 2);
+    group.current.scale.setScalar(
+      (worldHeight * CAMERA_MARKER_PIXELS) / (size.height * markerDepth),
+    );
+  });
+}
+
+function KeyframeHandles({
+  hidden,
+  curve,
+  markerDepth,
+  fovRadians,
+  frameWidth,
+  frameHeight,
+  selectedKeyId,
+  idleColor,
+  allowBelowFloor,
+  onMove,
+  onSelect,
+  onDraggingChange,
+}: {
+  hidden: boolean;
+  curve: ShotCurve;
+  markerDepth: number;
+  fovRadians: number;
+  frameWidth: number;
+  frameHeight: number;
+  selectedKeyId: string | null;
+  idleColor: string;
+  allowBelowFloor: boolean;
+  onMove: (id: string, position: TrajectoryPoint) => void;
+  onSelect: (id: string) => void;
+  onDraggingChange: (dragging: boolean) => void;
+}) {
+  const keys = curve.keyframes;
+  const labels = useRef(new Map<string, HTMLElement>());
+  const projected = useRef(new THREE.Vector3()).current;
+  useFrame(({ camera, size }) => {
+    const points = keys.map((key) => {
+      projected.set(...key.position).project(camera);
+      const x = (projected.x * 0.5 + 0.5) * size.width;
+      const y = (0.5 - projected.y * 0.5) * size.height;
+      return {
+        x,
+        y,
+        visible:
+          projected.z > -1 &&
+          projected.z < 1 &&
+          x >= 0 &&
+          x <= size.width - 70 &&
+          y >= 0 &&
+          y <= size.height - 40,
+      };
+    });
+    const visible = points.flatMap((point, index) =>
+      point.visible ? [index] : [],
+    );
+    const positions = layoutCameraLabels(
+      visible.map((index) => points[index]!),
+      Math.max(40, size.width - 70),
+      Math.max(40, size.height - 40),
+    );
+    keys.forEach((key, index) => {
+      const label = labels.current.get(key.id);
+      if (label)
+        label.style.visibility = points[index]!.visible ? "visible" : "hidden";
+    });
+    visible.forEach((index, slot) => {
+      const label = labels.current.get(keys[index]!.id);
+      if (label)
+        label.style.translate = `${positions[slot]!.x - points[index]!.x}px ${positions[slot]!.y - points[index]!.y}px`;
+    });
+  });
+
+  return keys.map((key, index) => (
+    <KeyframeHandle
+      key={key.id}
+      hidden={hidden}
+      keyframe={key}
+      number={index + 1}
+      quaternion={curve.poseAt(key.frame).quaternion}
+      markerDepth={markerDepth}
+      fovRadians={fovRadians}
+      frameWidth={frameWidth}
+      frameHeight={frameHeight}
+      selected={key.id === selectedKeyId}
+      idleColor={idleColor}
+      allowBelowFloor={allowBelowFloor}
+      onLabelReady={(node) => {
+        if (node) labels.current.set(key.id, node);
+        else labels.current.delete(key.id);
+      }}
+      onMove={(position) => onMove(key.id, position)}
+      onSelect={() => onSelect(key.id)}
+      onDraggingChange={onDraggingChange}
+    />
+  ));
+}
+
+function KeyframeHandle({
+  hidden,
+  keyframe,
+  number,
+  quaternion,
+  markerDepth,
+  fovRadians,
+  frameWidth,
+  frameHeight,
+  selected,
+  idleColor,
+  allowBelowFloor,
+  onLabelReady,
+  onMove,
+  onSelect,
+  onDraggingChange,
+}: {
+  hidden: boolean;
+  keyframe: CameraKeyframe;
+  number: number;
+  quaternion: TrajectoryQuaternion;
+  markerDepth: number;
+  fovRadians: number;
+  frameWidth: number;
+  frameHeight: number;
+  selected: boolean;
+  idleColor: string;
+  allowBelowFloor: boolean;
+  onLabelReady: (node: HTMLElement | null) => void;
+  onMove: (position: TrajectoryPoint) => void;
+  onSelect: () => void;
+  onDraggingChange: (dragging: boolean) => void;
+}) {
+  const group = useRef<THREE.Group>(null);
+  useScreenConstantScale(group, markerDepth);
+  const { hovered, dragging, handlers } = useMarkerDrag({
+    getPosition: () => keyframe.position,
+    allowBelowFloor,
+    disabled: hidden,
+    onStart: onSelect,
+    onChange: onMove,
+    onDraggingChange,
+  });
+  const hitHeight = 2 * Math.tan(fovRadians / 2) * markerDepth;
+  const intrinsics = useMemo(
+    () => frameIntrinsics(fovRadians, frameWidth, frameHeight),
+    [fovRadians, frameHeight, frameWidth],
+  );
+  const frustumCamera = useMemo(
+    () => ({
+      intrinsics,
+      extrinsics: {
+        position: [0, 0, 0] as TrajectoryPoint,
+        quaternion: [0, 0, 0, 1] as TrajectoryQuaternion,
+      },
+    }),
+    [intrinsics],
+  );
   return (
     <group
-      name="selected-camera-direction"
-      position={view.position}
-      quaternion={view.quaternion}
+      ref={group}
+      visible={!hidden}
+      position={keyframe.position}
+      renderOrder={100}
+      userData={{ cameraMarker: true, keyframe: keyframe.id }}
+      {...handlers}
     >
-      {outlineSegments.map((points, index) => (
-        <CameraDirectionStroke key={index} points={points} lineWidth={7} />
-      ))}
-      <CameraDirectionStroke
-        points={[
-          [0, 0, 0],
-          [0, 0, -depth * 1.55],
-        ]}
-        lineWidth={10}
+      <group quaternion={quaternion}>
+        <FrustumObject
+          camera={frustumCamera}
+          color={selected || dragging ? ACCENT : idleColor}
+          depth={markerDepth}
+          overlay
+          markers={false}
+          body
+        />
+        <mesh position={[0, 0, -markerDepth * 0.375]}>
+          <boxGeometry
+            args={[
+              Math.max((hitHeight * frameWidth) / frameHeight, markerDepth * 0.7),
+              hitHeight,
+              markerDepth * 1.25,
+            ]}
+          />
+          <meshBasicMaterial transparent opacity={0} depthWrite={false} />
+        </mesh>
+      </group>
+      <Html center zIndexRange={[5, 0]} className="pointer-events-none">
+        <span
+          ref={onLabelReady}
+          data-keyframe-label={number}
+          data-selected={selected || undefined}
+          data-active={hovered || dragging || undefined}
+          hidden={hidden}
+          className="studio-key-label"
+        >
+          {number}
+        </span>
+      </Html>
+    </group>
+  );
+}
+
+/** The shot camera at the playhead; dragging it records a key there. */
+function LiveCamera({
+  curve,
+  playhead,
+  markerDepth,
+  fovRadians,
+  frameWidth,
+  frameHeight,
+  allowBelowFloor,
+  disabled,
+  onMove,
+  onDraggingChange,
+}: {
+  curve: ShotCurve;
+  playhead: Playhead;
+  markerDepth: number;
+  fovRadians: number;
+  frameWidth: number;
+  frameHeight: number;
+  allowBelowFloor: boolean;
+  disabled: boolean;
+  onMove: (position: TrajectoryPoint) => void;
+  onDraggingChange: (dragging: boolean) => void;
+}) {
+  const group = useRef<THREE.Group>(null);
+  const aim = useRef<THREE.Group>(null);
+  useScreenConstantScale(group, markerDepth);
+  const { dragging, handlers } = useMarkerDrag({
+    getPosition: () => curve.positionAt(playhead.frame),
+    allowBelowFloor,
+    disabled,
+    onChange: onMove,
+    onDraggingChange,
+  });
+  const keyFrames = useMemo(
+    () => new Set(curve.keyframes.map((key) => key.frame)),
+    [curve],
+  );
+  useFrame(() => {
+    if (!group.current || !aim.current) return;
+    const frame = playhead.frame;
+    const pose = curve.poseAt(frame);
+    group.current.position.set(...pose.position);
+    aim.current.quaternion.set(...pose.quaternion);
+    // A key's own marker already stands here.
+    group.current.visible =
+      dragging ||
+      playhead.playing ||
+      !(Number.isInteger(frame) && keyFrames.has(frame));
+  });
+  const intrinsics = useMemo(
+    () => frameIntrinsics(fovRadians, frameWidth, frameHeight),
+    [fovRadians, frameHeight, frameWidth],
+  );
+  const frustumCamera = useMemo(
+    () => ({
+      intrinsics,
+      extrinsics: {
+        position: [0, 0, 0] as TrajectoryPoint,
+        quaternion: [0, 0, 0, 1] as TrajectoryQuaternion,
+      },
+    }),
+    [intrinsics],
+  );
+  if (curve.keyframes.length === 0) return null;
+  const hitHeight = 2 * Math.tan(fovRadians / 2) * markerDepth;
+  return (
+    <group ref={group} renderOrder={110} {...handlers}>
+      <group ref={aim}>
+        <FrustumObject
+          camera={frustumCamera}
+          color={ACCENT}
+          depth={markerDepth * 1.1}
+          overlay
+          markers
+          body
+          renderOrder={12}
+        />
+        <mesh position={[0, 0, -markerDepth * 0.4]}>
+          <boxGeometry
+            args={[
+              Math.max((hitHeight * frameWidth) / frameHeight, markerDepth * 0.7),
+              hitHeight,
+              markerDepth * 1.3,
+            ]}
+          />
+          <meshBasicMaterial transparent opacity={0} depthWrite={false} />
+        </mesh>
+      </group>
+    </group>
+  );
+}
+
+function SourceCameraMarker({
+  hidden,
+  view,
+  depth,
+  color,
+  frameWidth,
+  frameHeight,
+}: {
+  hidden: boolean;
+  view: CameraView;
+  depth: number;
+  color: string;
+  frameWidth: number;
+  frameHeight: number;
+}) {
+  const group = useRef<THREE.Group>(null);
+  useScreenConstantScale(group, depth);
+  const camera = useMemo(
+    () => ({
+      intrinsics: frameIntrinsics(view.fovRadians, frameWidth, frameHeight),
+      extrinsics: {
+        position: [0, 0, 0] as TrajectoryPoint,
+        quaternion: view.quaternion,
+      },
+    }),
+    [frameHeight, frameWidth, view.fovRadians, view.quaternion],
+  );
+  return (
+    <group
+      ref={group}
+      visible={!hidden}
+      position={view.position}
+      userData={{ sourceCameraMarker: true }}
+    >
+      <FrustumObject
+        camera={camera}
+        color={color}
+        depth={depth}
+        overlay
+        markers={false}
+        body
+        renderOrder={9}
+        dashed
       />
-      <mesh
-        position={[0, 0, -depth * 1.58]}
-        rotation={[-Math.PI / 2, 0, 0]}
-        renderOrder={88}
-        raycast={() => undefined}
-      >
-        <coneGeometry args={[depth * 0.18, depth * 0.38, 16]} />
-        <meshBasicMaterial
-          color={SELECTED_CAMERA_RED}
-          transparent
-          opacity={0.7}
-          depthTest={false}
-          depthWrite={false}
-          toneMapped={false}
-        />
-      </mesh>
-      <mesh
-        position={[0, 0, -depth * 1.58]}
-        rotation={[-Math.PI / 2, 0, 0]}
-        renderOrder={89}
-        raycast={() => undefined}
-      >
-        <coneGeometry args={[depth * 0.115, depth * 0.3, 16]} />
-        <meshBasicMaterial
-          color={SELECTED_CAMERA_DARK_RED}
-          depthTest={false}
-          depthWrite={false}
-          toneMapped={false}
-        />
-      </mesh>
+      <Html center zIndexRange={[4, 0]} className="pointer-events-none">
+        <span
+          data-source-camera-label
+          hidden={hidden}
+          className="studio-source-label"
+        >
+          Source
+        </span>
+      </Html>
     </group>
   );
 }
@@ -693,10 +1457,9 @@ function DirectionTargetPicker({
       if (event.key !== "Enter" && event.key !== " ") return;
       if (
         !(event.target instanceof HTMLElement) ||
-        event.target.dataset.lookAtPicker !== "picking"
-      ) {
+        !event.target.classList.contains("is-picking")
+      )
         return;
-      }
       event.preventDefault();
       camera.getWorldDirection(forward);
       const closest = closestDirectionTarget(
@@ -714,9 +1477,7 @@ function DirectionTargetPicker({
     if (!plane.current || !(camera instanceof THREE.PerspectiveCamera)) return;
     const distance = Math.max(camera.near * 4, 0.1);
     camera.getWorldDirection(forward);
-    plane.current.position
-      .copy(camera.position)
-      .addScaledVector(forward, distance);
+    plane.current.position.copy(camera.position).addScaledVector(forward, distance);
     plane.current.quaternion.copy(camera.quaternion);
     const height =
       2 * distance * Math.tan(THREE.MathUtils.degToRad(camera.fov) / 2);
@@ -763,10 +1524,7 @@ function closestDirectionTarget(
   const offset = new THREE.Vector3();
   for (const candidate of candidates) {
     candidateVector.set(...candidate);
-    const depth = offset
-      .copy(candidateVector)
-      .sub(ray.origin)
-      .dot(ray.direction);
+    const depth = offset.copy(candidateVector).sub(ray.origin).dot(ray.direction);
     if (depth <= 0) continue;
     const angle = Math.sqrt(ray.distanceSqToPoint(candidateVector)) / depth;
     if (
@@ -784,9 +1542,11 @@ function closestDirectionTarget(
 }
 
 function DirectionTargetMarker({
+  hidden,
   position,
   label,
 }: {
+  hidden: boolean;
   position: TrajectoryPoint;
   label: string;
 }) {
@@ -806,6 +1566,7 @@ function DirectionTargetMarker({
   return (
     <group
       ref={group}
+      visible={!hidden}
       position={position}
       renderOrder={95}
       userData={{ cameraLookTarget: true }}
@@ -813,7 +1574,7 @@ function DirectionTargetMarker({
       <mesh raycast={() => undefined}>
         <ringGeometry args={[0.3, 0.45, 32]} />
         <meshBasicMaterial
-          color="#f4b860"
+          color={ACCENT}
           transparent
           opacity={0.95}
           side={THREE.DoubleSide}
@@ -822,35 +1583,40 @@ function DirectionTargetMarker({
           toneMapped={false}
         />
       </mesh>
-      <Line
-        points={[
-          [-0.62, 0, 0],
-          [0.62, 0, 0],
-        ]}
-        color="#ffd18d"
-        lineWidth={4}
-        depthTest={false}
-        raycast={() => undefined}
-      />
-      <Line
-        points={[
-          [0, -0.62, 0],
-          [0, 0.62, 0],
-        ]}
-        color="#ffd18d"
-        lineWidth={4}
-        depthTest={false}
-        raycast={() => undefined}
-      />
-      <Html
-        position={[0, 0.9, 0]}
-        center
-        zIndexRange={[30, 0]}
-        className="pointer-events-none"
-      >
+      {(
+        [
+          [
+            [-0.75, 0, 0],
+            [-0.5, 0, 0],
+          ],
+          [
+            [0.5, 0, 0],
+            [0.75, 0, 0],
+          ],
+          [
+            [0, -0.75, 0],
+            [0, -0.5, 0],
+          ],
+          [
+            [0, 0.5, 0],
+            [0, 0.75, 0],
+          ],
+        ] as [TrajectoryPoint, TrajectoryPoint][]
+      ).map((points, index) => (
+        <Line
+          key={index}
+          points={points}
+          color={ACCENT}
+          lineWidth={3}
+          depthTest={false}
+          raycast={() => undefined}
+        />
+      ))}
+      <Html position={[0, 1, 0]} center zIndexRange={[5, 0]} className="pointer-events-none">
         <div
           data-camera-look-target="set"
-          className="whitespace-nowrap rounded border border-[#f4b860]/50 bg-[#17181d]/95 px-2 py-1 text-[9px] font-semibold uppercase tracking-[0.08em] text-[#ffd18d] shadow-lg backdrop-blur"
+          hidden={hidden}
+          className="studio-target-label"
         >
           {label}
         </div>
@@ -859,441 +1625,67 @@ function DirectionTargetMarker({
   );
 }
 
-function CameraDirectionStroke({
-  points,
-  lineWidth,
+/** The view through the shot camera at the playhead. */
+export function ShotCameraView({
+  pose,
+  curve,
+  playhead,
+  fovRadians,
+  theme,
+  fill,
 }: {
-  points: readonly TrajectoryPoint[];
-  lineWidth: number;
+  pose: PosedView;
+  curve: ShotCurve;
+  playhead: Playhead;
+  fovRadians: number;
+  theme: StudioTheme;
+  fill: boolean;
 }) {
   return (
-    <>
-      <Line
-        points={[...points]}
-        color={SELECTED_CAMERA_RED}
-        lineWidth={lineWidth + 5}
-        transparent
-        opacity={0.7}
-        depthTest={false}
-        depthWrite={false}
-        toneMapped={false}
-        renderOrder={88}
-        raycast={() => undefined}
-      />
-      <Line
-        points={[...points]}
-        color={SELECTED_CAMERA_DARK_RED}
-        lineWidth={lineWidth}
-        depthTest={false}
-        depthWrite={false}
-        toneMapped={false}
-        renderOrder={89}
-        raycast={() => undefined}
-      />
-    </>
-  );
-}
-
-function TrajectoryHandles({
-  segments,
-  views,
-  markerDepth,
-  frameWidth,
-  frameHeight,
-  selectedPivot,
-  disabled,
-  allowBelowFloor,
-  onChange,
-  onSelect,
-  onDraggingChange,
-}: {
-  segments: readonly TrajectorySegment[];
-  views: readonly CameraView[];
-  markerDepth: number;
-  frameWidth: number;
-  frameHeight: number;
-  selectedPivot: { segmentId: string; pointIndex: number } | null;
-  disabled: boolean;
-  allowBelowFloor: boolean;
-  onChange: (
-    segmentId: string,
-    pointIndex: number,
-    position: TrajectoryPoint,
-  ) => void;
-  onSelect: (
-    segmentId: string,
-    pointIndex: number,
-    pivotNumber: number,
-  ) => void;
-  onDraggingChange: (dragging: boolean) => void;
-}) {
-  const handles = trajectoryPivotsFromSegments(segments);
-
-  return handles.map((handle) => (
-    <TrajectoryHandle
-      key={`${handle.segmentId}:${handle.pointIndex}`}
-      position={handle.position}
-      view={views[handle.pivotNumber - 1]!}
-      markerDepth={markerDepth}
-      frameWidth={frameWidth}
-      frameHeight={frameHeight}
-      pivotNumber={handle.pivotNumber}
-      selected={
-        handle.segmentId === selectedPivot?.segmentId &&
-        handle.pointIndex === selectedPivot.pointIndex
-      }
-      hasCameraAngle={handle.hasCameraAngle}
-      disabled={disabled}
-      allowBelowFloor={allowBelowFloor}
-      onChange={(nextPosition) =>
-        onChange(handle.segmentId, handle.pointIndex, nextPosition)
-      }
-      onSelect={() =>
-        onSelect(handle.segmentId, handle.pointIndex, handle.pivotNumber)
-      }
-      onDraggingChange={onDraggingChange}
-    />
-  ));
-}
-
-function TrajectoryHandle({
-  position,
-  view,
-  markerDepth,
-  frameWidth,
-  frameHeight,
-  pivotNumber,
-  selected,
-  hasCameraAngle,
-  disabled,
-  allowBelowFloor,
-  onChange,
-  onSelect,
-  onDraggingChange,
-}: {
-  position: TrajectoryPoint;
-  view: CameraView;
-  markerDepth: number;
-  frameWidth: number;
-  frameHeight: number;
-  pivotNumber: number;
-  selected: boolean;
-  hasCameraAngle: boolean;
-  disabled: boolean;
-  allowBelowFloor: boolean;
-  onChange: (position: TrajectoryPoint) => void;
-  onSelect: () => void;
-  onDraggingChange: (dragging: boolean) => void;
-}) {
-  const group = useRef<THREE.Group>(null);
-  const orbitControls = useThree(
-    (state) => state.controls,
-  ) as OrbitControlsImpl | null;
-  const canvas = useThree((state) => state.gl.domElement);
-  const camera = useThree((state) => state.camera);
-  const viewportHeight = useThree((state) => state.size.height);
-  const hitDepth = markerDepth * (selected ? 2.65 : 1);
-  const hitHeight =
-    2 * Math.tan(view.fovRadians / 2) * markerDepth * (selected ? 1.65 : 1);
-
-  const [hovered, setHovered] = useState(false);
-  const [dragging, setDragging] = useState(false);
-  const drag = useRef<{
-    pointerId: number;
-    plane: THREE.Plane;
-    grabOffset: THREE.Vector3;
-    startPosition: TrajectoryPoint;
-  } | null>(null);
-
-  useFrame(() => {
-    if (!group.current || !(camera instanceof THREE.PerspectiveCamera)) return;
-    const distance = camera.position.distanceTo(new THREE.Vector3(...position));
-    const worldHeight =
-      2 * distance * Math.tan(THREE.MathUtils.degToRad(camera.fov) / 2);
-    group.current.scale.setScalar((worldHeight * 10) / viewportHeight);
-  });
-
-  useEffect(
-    () => () => {
-      if (drag.current) onDraggingChange(false);
-      canvas.style.cursor = "";
-    },
-    [canvas, onDraggingChange],
-  );
-
-  function startDrag(event: ThreeEvent<PointerEvent>) {
-    if (disabled || event.button !== 0 || drag.current) return;
-    event.stopPropagation();
-    event.nativeEvent.stopImmediatePropagation();
-    if (orbitControls) orbitControls.enabled = false;
-    onSelect();
-
-    const worldPosition = new THREE.Vector3(...position);
-    const plane = new THREE.Plane().setFromNormalAndCoplanarPoint(
-      event.camera.getWorldDirection(new THREE.Vector3()),
-      worldPosition,
-    );
-    const intersection = event.ray.intersectPlane(plane, new THREE.Vector3());
-    if (!intersection) {
-      if (orbitControls) orbitControls.enabled = true;
-      return;
-    }
-
-    (event.target as Element).setPointerCapture(event.pointerId);
-    drag.current = {
-      pointerId: event.pointerId,
-      plane,
-      grabOffset: intersection.sub(worldPosition),
-      startPosition: [...position],
-    };
-    canvas.style.cursor = "grabbing";
-    setDragging(true);
-    onDraggingChange(true);
-  }
-
-  function continueDrag(event: ThreeEvent<PointerEvent>) {
-    const activeDrag = drag.current;
-    if (!activeDrag || activeDrag.pointerId !== event.pointerId) return;
-    event.stopPropagation();
-    const intersection = event.ray.intersectPlane(
-      activeDrag.plane,
-      new THREE.Vector3(),
-    );
-    if (!intersection) return;
-    intersection.sub(activeDrag.grabOffset);
-    if (!allowBelowFloor) {
-      intersection.y = Math.max(TRAJECTORY_FLOOR_Y, intersection.y);
-    }
-    onChange(intersection.toArray());
-  }
-
-  function finishDrag(event: ThreeEvent<PointerEvent>) {
-    const activeDrag = drag.current;
-    if (!activeDrag || activeDrag.pointerId !== event.pointerId) return;
-    event.stopPropagation();
-    drag.current = null;
-    setDragging(false);
-    onDraggingChange(false);
-    if (orbitControls) orbitControls.enabled = true;
-    canvas.style.cursor = hovered ? "grab" : "";
-    const target = event.target as Element;
-    if (target.hasPointerCapture(event.pointerId)) {
-      target.releasePointerCapture(event.pointerId);
-    }
-  }
-
-  function cancelDrag(event: ThreeEvent<PointerEvent>) {
-    const activeDrag = drag.current;
-    if (!activeDrag || activeDrag.pointerId !== event.pointerId) return;
-    onChange(activeDrag.startPosition);
-    finishDrag(event);
-  }
-
-  return (
-    <group
-      position={position}
-      renderOrder={100}
-      onPointerDown={startDrag}
-      onPointerMove={continueDrag}
-      onPointerUp={finishDrag}
-      onPointerCancel={cancelDrag}
-      onLostPointerCapture={cancelDrag}
-      onPointerOver={(event) => {
-        event.stopPropagation();
-        setHovered(true);
-        if (!drag.current) canvas.style.cursor = "grab";
-      }}
-      onPointerOut={() => {
-        setHovered(false);
-        if (!drag.current) canvas.style.cursor = "";
-      }}
+    <Canvas
+      className="pointer-events-none h-full w-full"
+      camera={{ fov: 50, near: 0.01, far: 1000 }}
+      dpr={[1, 1.5]}
+      frameloop="demand"
+      gl={{ antialias: true }}
     >
-      <group quaternion={view.quaternion}>
-        <FrustumObject
-          camera={{
-            intrinsics: frameIntrinsics(
-              view.fovRadians,
-              frameWidth,
-              frameHeight,
-            ),
-            extrinsics: { position: [0, 0, 0], quaternion: [0, 0, 0, 1] },
-          }}
-          color={selected ? "#ff4d5d" : "#8ca8ff"}
-          depth={markerDepth}
-          overlay
-          markers={false}
-        />
-        <mesh position={[0, 0, -hitDepth / 2]}>
-          <boxGeometry
-            args={[(hitHeight * frameWidth) / frameHeight, hitHeight, hitDepth]}
-          />
-          <meshBasicMaterial transparent opacity={0} depthWrite={false} />
-        </mesh>
-      </group>
-      {selected && (
-        <SelectedCameraDirection
-          view={{ ...view, position: [0, 0, 0] }}
-          depth={markerDepth * 1.65}
-          aspectRatio={frameWidth / frameHeight}
-        />
-      )}
-      <group ref={group}>
-        <mesh>
-          <sphereGeometry args={[1, 24, 16]} />
-          <meshBasicMaterial
-            color={dragging || hovered || selected ? "#f7f5ef" : "#a9bcff"}
-            depthTest={false}
-            depthWrite={false}
-            toneMapped={false}
-          />
-        </mesh>
-        <mesh>
-          <sphereGeometry args={[2.5, 16, 12]} />
-          <meshBasicMaterial
-            transparent
-            opacity={0}
-            depthTest={false}
-            depthWrite={false}
-          />
-        </mesh>
-        <Html center zIndexRange={[30, 0]} className="pointer-events-none">
-          <span
-            data-camera-handle={pivotNumber}
-            data-camera-selected={selected}
-            data-camera-position={position.join(",")}
-            data-camera-angle={hasCameraAngle ? "set" : "unset"}
-            className={`grid h-5 w-5 place-items-center rounded-full border text-[10px] font-bold shadow-lg transition ${
-              dragging || hovered
-                ? "border-white bg-white text-[#10131c]"
-                : selected
-                  ? "border-white bg-white text-[#10131c]"
-                  : "border-[#b8c4e8] bg-[#8997bf] text-[#10131c]"
-            } ${hasCameraAngle ? "ring-2 ring-white/90 ring-offset-1 ring-offset-[#10131c]" : ""}`}
-          >
-            {pivotNumber}
-          </span>
-        </Html>
-      </group>
-    </group>
+      <ClearColor color={SCENE_PALETTE[theme].background} />
+      <PosedPointCloud pose={pose} scaleMultiplier={0.7} fill={fill} />
+      <ShotCameraController
+        curve={curve}
+        playhead={playhead}
+        fovRadians={fovRadians}
+      />
+    </Canvas>
   );
 }
 
-function OverviewCamera({
-  home,
-  target,
-  controls,
-  onDrawingViewChange,
+function ShotCameraController({
+  curve,
+  playhead,
+  fovRadians,
 }: {
-  home: { position: [number, number, number] };
-  target: [number, number, number];
-  controls: RefObject<OrbitControlsImpl | null>;
-  onDrawingViewChange: (view: TrajectoryDrawingView) => void;
+  curve: ShotCurve;
+  playhead: Playhead;
+  fovRadians: number;
 }) {
-  const camera = useRef(useThree((state) => state.camera)).current;
-
-  useEffect(() => {
-    camera.position.set(...home.position);
-    camera.lookAt(...target);
-    if (controls.current) {
-      controls.current.target.set(...target);
-      controls.current.update();
+  const camera = useThree((state) => state.camera);
+  const invalidate = useThree((state) => state.invalidate);
+  useEffect(() => playhead.subscribe(() => invalidate()), [invalidate, playhead]);
+  useEffect(() => invalidate(), [curve, fovRadians, invalidate]);
+  useFrame(() => {
+    if (!(camera instanceof THREE.PerspectiveCamera)) return;
+    const pose = curve.poseAt(playhead.frame);
+    camera.position.set(...pose.position);
+    camera.quaternion.set(...pose.quaternion);
+    const fov = THREE.MathUtils.radToDeg(fovRadians);
+    if (camera.fov !== fov) {
+      camera.fov = fov;
+      camera.updateProjectionMatrix();
     }
     camera.updateMatrixWorld();
-    onDrawingViewChange(cameraDrawingView(camera.quaternion.toArray()));
-  }, [camera, controls, home, onDrawingViewChange, target]);
-
-  return null;
-}
-
-function PreviewCamera({
-  views,
-  previewing,
-  frameCount,
-  previewSeconds,
-  aspectRatio,
-  directionMode,
-  directionTarget,
-  closedLoop,
-  allowBelowFloor,
-  onDone,
-}: {
-  views: readonly CameraView[];
-  previewing: boolean;
-  frameCount: number;
-  previewSeconds: number;
-  aspectRatio: number;
-  directionMode: CameraDirectionMode;
-  directionTarget: TrajectoryPoint;
-  closedLoop: boolean;
-  allowBelowFloor: boolean;
-  onDone: () => void;
-}) {
-  const previewCamera = useRef<THREE.PerspectiveCamera>(null);
-  const samples = useMemo(
-    () =>
-      sampleCameraPath(views, frameCount, {
-        directionMode,
-        directionTarget,
-        closedLoop,
-        allowBelowFloor,
-      }),
-    [
-      allowBelowFloor,
-      closedLoop,
-      directionMode,
-      directionTarget,
-      frameCount,
-      views,
-    ],
-  );
-  const startedAt = useRef<number | null>(null);
-  const finished = useRef(false);
-
-  useEffect(() => {
-    startedAt.current = null;
-    finished.current = false;
-  }, [previewing]);
-
-  useFrame(({ clock }) => {
-    if (
-      !previewing ||
-      samples.length === 0 ||
-      finished.current ||
-      !previewCamera.current
-    )
-      return;
-    startedAt.current ??= clock.elapsedTime;
-    const progress = Math.min(
-      (clock.elapsedTime - startedAt.current) / previewSeconds,
-      1,
-    );
-    const index = Math.min(
-      Math.floor(progress * samples.length),
-      samples.length - 1,
-    );
-    const sample = samples[index]!;
-    previewCamera.current.position.set(...sample.position);
-    previewCamera.current.quaternion.set(...sample.quaternion);
-    previewCamera.current.fov = THREE.MathUtils.radToDeg(sample.fovRadians);
-    previewCamera.current.updateProjectionMatrix();
-    previewCamera.current.updateMatrixWorld();
-
-    if (progress === 1) {
-      finished.current = true;
-      onDone();
-    }
   });
-
-  return (
-    <PerspectiveCamera
-      ref={previewCamera}
-      makeDefault={previewing}
-      fov={THREE.MathUtils.radToDeg(views[0]!.fovRadians)}
-      aspect={aspectRatio}
-      near={0.01}
-      far={1000}
-    />
-  );
+  return null;
 }
 
 function frameIntrinsics(
@@ -1309,70 +1701,30 @@ function frameIntrinsics(
 }
 
 function buildOverviewPosition(
-  referencePosition: [number, number, number],
-  targetPosition: [number, number, number],
-  segments: readonly TrajectorySegment[],
-): [number, number, number] {
+  referencePosition: TrajectoryPoint,
+  targetPosition: TrajectoryPoint,
+  pathPoints: readonly TrajectoryPoint[],
+): TrajectoryPoint {
   const target = new THREE.Vector3(...targetPosition);
   const radial = new THREE.Vector3(...referencePosition).sub(target);
   const referenceDistance = Math.max(radial.length(), 1);
   const pathRadius = Math.max(
     0,
-    ...segments.flatMap((segment) =>
-      segment.points.map((point) =>
-        new THREE.Vector3(...point).distanceTo(target),
-      ),
-    ),
+    ...pathPoints.map((point) => new THREE.Vector3(...point).distanceTo(target)),
   );
-  radial.normalize();
-  const side = new THREE.Vector3().crossVectors(
-    radial,
-    new THREE.Vector3(0, 1, 0),
+  const direction = isometricViewDirection(
+    referencePosition,
+    targetPosition,
+    new THREE.Vector3(),
   );
-  if (side.lengthSq() < 1e-5) side.set(1, 0, 0);
-  side.normalize();
-  const direction = radial
-    .multiplyScalar(1.05)
-    .addScaledVector(side, 0.35)
-    .addScaledVector(new THREE.Vector3(0, 1, 0), 0.25)
-    .normalize();
+  // Preserve the overview framing with a narrower lens for flatter depth.
+  const lensScale =
+    Math.tan(THREE.MathUtils.degToRad(25)) /
+    Math.tan(THREE.MathUtils.degToRad(OVERVIEW_FOV / 2));
   return target
     .addScaledVector(
       direction,
-      Math.max(referenceDistance * 1.15, pathRadius * 2.5),
+      Math.max(referenceDistance * 1.15, pathRadius * 2.5) * lensScale,
     )
-    .toArray();
-}
-
-function PosedPointCloud({
-  pose,
-  scaleMultiplier,
-}: {
-  pose: PosedView;
-  scaleMultiplier: number;
-}) {
-  const geometry = useMemo(() => {
-    const g = new THREE.BufferGeometry();
-    g.setAttribute(
-      "position",
-      new THREE.BufferAttribute(pose.points.positions, 3),
-    );
-    g.setAttribute("color", new THREE.BufferAttribute(pose.points.colors, 3));
-    return g;
-  }, [pose]);
-  useEffect(() => () => geometry.dispose(), [geometry]);
-  return (
-    <group
-      position={pose.camera.extrinsics.position}
-      quaternion={pose.camera.extrinsics.quaternion}
-    >
-      <points geometry={geometry}>
-        <pointsMaterial
-          vertexColors
-          size={pose.points.pointSize * scaleMultiplier}
-          sizeAttenuation
-        />
-      </points>
-    </group>
-  );
+    .toArray() as TrajectoryPoint;
 }

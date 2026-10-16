@@ -7,7 +7,21 @@
       name="description"
       content="Turn an image into a camera move. An open-source camera-path editor powered by the Marble API."
     />
-    <title>Atlas Camera Studio</title>
+    <title>Atlas Camera Studio · World Labs</title>
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <script>
+      try {
+        var stored = localStorage.getItem("atlas-camera-studio-theme");
+        document.documentElement.dataset.theme =
+          stored === "light" || stored === "dark"
+            ? stored
+            : matchMedia("(prefers-color-scheme: dark)").matches
+              ? "dark"
+              : "light";
+      } catch (error) {
+        document.documentElement.dataset.theme = "light";
+      }
+    </script>
   </head>
   <body>
     <div id="root"></div>

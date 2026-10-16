@@ -1,4 +1,4 @@
-import { useEffect, useMemo } from "react";
+import { useEffect, useMemo, useRef } from "react";
 import * as THREE from "three";
 import type { PosedCamera } from "./common";
 
@@ -36,6 +36,9 @@ export type FrustumObjectProps = {
    * rolled. Wireframe alone is too thin to read a colour off.
    */
   markers?: boolean;
+  dashed?: boolean;
+  body?: boolean;
+  renderOrder?: number;
 };
 
 /** Where a photo was taken from, at the field of view its intrinsics describe. */
@@ -45,12 +48,20 @@ export function FrustumObject({
   depth,
   overlay = false,
   markers = true,
+  dashed = false,
+  body = false,
+  renderOrder,
 }: FrustumObjectProps) {
   const geometry = useMemo(
     () => buildFrustumGeometry(camera, depth),
     [camera, depth],
   );
   useEffect(() => () => geometry.dispose(), [geometry]);
+
+  const lines = useRef<THREE.LineSegments>(null);
+  useEffect(() => {
+    if (dashed) lines.current?.computeLineDistances();
+  }, [dashed, geometry]);
 
   const { fx, fy, cx, cy, width } = camera.intrinsics;
   const farWidth = (width / fx) * depth;
@@ -65,12 +76,38 @@ export function FrustumObject({
       quaternion={camera.extrinsics.quaternion}
     >
       <lineSegments
+        ref={lines}
         raycast={() => undefined}
         geometry={geometry}
-        renderOrder={overlay ? OVERLAY_RENDER_ORDER : 0}
+        renderOrder={renderOrder ?? (overlay ? OVERLAY_RENDER_ORDER : 0)}
       >
-        <lineBasicMaterial color={color} depthTest={!overlay} />
+        {dashed ? (
+          <lineDashedMaterial
+            color={color}
+            dashSize={depth * 0.06}
+            gapSize={depth * 0.04}
+            depthTest={!overlay}
+          />
+        ) : (
+          <lineBasicMaterial color={color} depthTest={!overlay} />
+        )}
       </lineSegments>
+
+      {body && (
+        <mesh
+          position={[0, 0, depth * 0.05]}
+          renderOrder={renderOrder ?? (overlay ? OVERLAY_RENDER_ORDER : 0)}
+          raycast={() => undefined}
+        >
+          <boxGeometry args={[depth * 0.65, depth * 0.4, depth * 0.25]} />
+          <meshBasicMaterial
+            wireframe
+            color={color}
+            depthTest={!overlay}
+            toneMapped={false}
+          />
+        </mesh>
+      )}
 
       {markers && (
         <>
